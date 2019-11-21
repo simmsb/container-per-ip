@@ -1,0 +1,11 @@
+[package]
+name = "container-per-ip"
+version = "0.1.0"
+authors = ["Ben Simms <ben@bensimms.moe>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bollard = "0.3.3"
+structopt = "0.3.4"
