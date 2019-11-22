@@ -4,9 +4,9 @@ use structopt::StructOpt;
 
 use tokio::prelude::*;
 
-mod timeout_queue;
 mod connections;
 mod container_mgmt;
+mod timeout_queue;
 
 #[derive(Debug, Snafu)]
 enum Error {

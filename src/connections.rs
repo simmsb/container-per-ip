@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::net::SocketAddr;
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
 use tokio::prelude::*;
+use tokio::sync::oneshot;
 
+use crate::container_mgmt::{ContainerID, DeployedContainer};
 use crate::timeout_queue::CancellableTimeoutQueue;
-use crate::container_mgmt::{DeployedContainer, ContainerID};
 
 #[derive(Debug)]
 pub struct ActiveConnection {

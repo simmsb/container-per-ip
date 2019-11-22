@@ -7,8 +7,8 @@ use bollard::{
 };
 use log::{info, warn};
 use snafu::{ResultExt, Snafu};
-use tokio::net::TcpStream;
 use std::net::IpAddr;
+use tokio::net::TcpStream;
 
 use crate::Opt;
 
@@ -16,7 +16,12 @@ use crate::Opt;
 pub enum Error {
     #[snafu(display("Failed to deploy container: {}", source))]
     DeployContainer { source: bollard::errors::Error },
-    #[snafu(display("Failed to connect to container on port ({:?}:{}): {}", ip, port, source))]
+    #[snafu(display(
+        "Failed to connect to container on port ({:?}:{}): {}",
+        ip,
+        port,
+        source
+    ))]
     ConnectContainer {
         ip: IpAddr,
         port: u16,

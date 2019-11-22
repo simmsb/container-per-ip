@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
-use std::time::{Duration, Instant};
 use std::collections::BinaryHeap;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Mutex};
 use tokio::timer::Timeout;
@@ -55,10 +55,15 @@ impl<K: PartialEq, T> CancellableTimeoutQueue<K, T> {
             .peek()
             .map_or(true, |x| expiry_instant < x.expiry_instant);
 
-        queue.push(Item { expiry_instant, item: (key, value) });
+        queue.push(Item {
+            expiry_instant,
+            item: (key, value),
+        });
 
         if should_trigger_wakeup {
-            self.wakeup_send.send(TimeoutQueueMsg::RePoll).await
+            self.wakeup_send
+                .send(TimeoutQueueMsg::RePoll)
+                .await
                 .expect("TimeoutQueue waker dropped when it shouldn't");
         }
     }
@@ -67,17 +72,27 @@ impl<K: PartialEq, T> CancellableTimeoutQueue<K, T> {
         let _lock = self.dequeue_lock.lock().await;
 
         loop {
-            if let Some(Item { item: (key, value), expiry_instant }) = self.queue.lock().await.pop() {
+            if let Some(Item {
+                item: (key, value),
+                expiry_instant,
+            }) = self.queue.lock().await.pop()
+            {
                 self.current_waiting = Some(key);
 
-                if let Ok(Some(msg)) = Timeout::new_at(self.wakeup_recv.recv(), expiry_instant).await {
+                if let Ok(Some(msg)) =
+                    Timeout::new_at(self.wakeup_recv.recv(), expiry_instant).await
+                {
                     // woken up, reinsert and reloop
 
-                    let key = self.current_waiting
-                                  .take()
-                                  .expect("current key removed when it should be there.");
+                    let key = self
+                        .current_waiting
+                        .take()
+                        .expect("current key removed when it should be there.");
                     if msg != TimeoutQueueMsg::Discard {
-                        self.queue.lock().await.push(Item { expiry_instant, item: (key, value) });
+                        self.queue.lock().await.push(Item {
+                            expiry_instant,
+                            item: (key, value),
+                        });
                     }
                     continue;
                 } else {
@@ -96,18 +111,22 @@ impl<K: PartialEq, T> CancellableTimeoutQueue<K, T> {
 
     pub async fn cancel(&mut self, key: K) {
         if self.current_waiting.as_ref() == Some(&key) {
-            self.wakeup_send.send(TimeoutQueueMsg::Discard)
-                            .await.expect("TimeoutQueue waker dropped when it shouldn't");
+            self.wakeup_send
+                .send(TimeoutQueueMsg::Discard)
+                .await
+                .expect("TimeoutQueue waker dropped when it shouldn't");
         }
 
         let mut queue = self.queue.lock().await;
 
-        let vec = queue.drain().filter(|item| item.item.0 != key).collect::<Vec<_>>();
+        let vec = queue
+            .drain()
+            .filter(|item| item.item.0 != key)
+            .collect::<Vec<_>>();
 
         queue.extend(vec);
     }
 }
-
 
 impl<T> PartialOrd for Item<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
