@@ -1,38 +1,52 @@
-use snafu::Snafu;
+use bollard::Docker;
+use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
 
 use tokio::prelude::*;
 
+mod timeout_queue;
+mod connections;
+mod container_mgmt;
+
 #[derive(Debug, Snafu)]
-enum Error {}
+enum Error {
+    #[snafu(display("An error occured with docker: {}", source))]
+    DockerError { source: bollard::errors::Error },
+}
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "container-per-ip", about = "Run a container per client ip")]
-struct Opt {
+pub struct Opt {
     #[structopt()]
     /// The docker image to run for each ip
-    image: String,
+    pub image: String,
 
     #[structopt(long)]
     /// Should the containers be started with the `--privileged` flag
-    privileged: bool,
+    pub privileged: bool,
 
     #[structopt(short, long)]
     /// Ports to listen on (tcp only currently)
-    ports: Vec<u64>,
+    pub ports: Vec<u16>,
 
     #[structopt(long)]
     /// Timeout (seconds) after an IPs last connection disconnects before
     /// killing the associated container
-    timeout: Option<f64>,
+    pub timeout: Option<f64>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = Opt::from_args();
     println!("{:?}", opt);
+
+    let docker = Docker::connect_with_local_defaults().context(DockerError)?;
+
+    let version = docker.version().await.context(DockerError)?;
+
+    println!("Docker version: {:?}", version);
 
     Ok(())
 }
