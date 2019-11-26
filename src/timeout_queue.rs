@@ -9,21 +9,18 @@ use tokio::timer::Timeout;
 enum TimeoutQueueMsg {
     Wake,
     RePoll,
-    Discard,
 }
 
-/// A Timeout queue with item keys that lets you cancel the timeout of an item
+/// A Timeout queue
 ///
 /// Mostly adapted from [`fibers_timeout_queue`]
 ///
 /// [`fibers_timeout_queue`]: https://github.com/sile/fibers_timeout_queue
 #[derive(Debug)]
-pub struct CancellableTimeoutQueue<K, T> {
-    queue: Mutex<BinaryHeap<Item<(K, T)>>>,
-    current_waiting: Option<K>,
-    wakeup_recv: mpsc::Receiver<TimeoutQueueMsg>,
-    wakeup_send: mpsc::Sender<TimeoutQueueMsg>,
-    dequeue_lock: Mutex<()>,
+pub struct TimeoutQueue<T> {
+    queue: Mutex<BinaryHeap<Item<T>>>,
+    enqueue_lock: Mutex<mpsc::Sender<TimeoutQueueMsg>>,
+    dequeue_lock: Mutex<mpsc::Receiver<TimeoutQueueMsg>>,
 }
 
 #[derive(Debug)]
@@ -32,20 +29,19 @@ struct Item<T> {
     item: T,
 }
 
-impl<K: PartialEq, T> CancellableTimeoutQueue<K, T> {
+impl<T> TimeoutQueue<T> {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(1);
 
-        CancellableTimeoutQueue {
+        TimeoutQueue {
             queue: Mutex::new(BinaryHeap::new()),
-            current_waiting: None,
-            wakeup_recv: rx,
-            wakeup_send: tx,
-            dequeue_lock: Mutex::new(()),
+            enqueue_lock: Mutex::new(tx),
+            dequeue_lock: Mutex::new(rx),
         }
     }
 
-    pub async fn push(&mut self, key: K, value: T, timeout: Duration) {
+    pub async fn push(&self, value: T, timeout: Duration) {
+        let mut wakeup_send = self.enqueue_lock.lock().await;
         let expiry_instant = Instant::now() + timeout;
 
         let mut queue = self.queue.lock().await;
@@ -57,74 +53,38 @@ impl<K: PartialEq, T> CancellableTimeoutQueue<K, T> {
 
         queue.push(Item {
             expiry_instant,
-            item: (key, value),
+            item: value,
         });
 
         if should_trigger_wakeup {
-            self.wakeup_send
+            wakeup_send
                 .send(TimeoutQueueMsg::RePoll)
                 .await
                 .expect("TimeoutQueue waker dropped when it shouldn't");
         }
     }
 
-    pub async fn pop(&mut self) -> T {
-        let _lock = self.dequeue_lock.lock().await;
+    pub async fn pop(&self) -> T {
+        let mut wakeup_recv = self.dequeue_lock.lock().await;
 
         loop {
             if let Some(Item {
-                item: (key, value),
+                item: value,
                 expiry_instant,
             }) = self.queue.lock().await.pop()
             {
-                self.current_waiting = Some(key);
-
-                if let Ok(Some(msg)) =
-                    Timeout::new_at(self.wakeup_recv.recv(), expiry_instant).await
-                {
-                    // woken up, reinsert and reloop
-
-                    let key = self
-                        .current_waiting
-                        .take()
-                        .expect("current key removed when it should be there.");
-                    if msg != TimeoutQueueMsg::Discard {
-                        self.queue.lock().await.push(Item {
-                            expiry_instant,
-                            item: (key, value),
-                        });
-                    }
+                if let Ok(Some(_msg)) = Timeout::new_at(wakeup_recv.recv(), expiry_instant).await {
                     continue;
                 } else {
                     // timeout expired, return value
-                    self.current_waiting.take();
                     return value;
                 }
             } else {
                 // no items left, go to sleep
-
-                let res = self.wakeup_recv.recv().await;
+                let res = wakeup_recv.recv().await;
                 assert_eq!(res, Some(TimeoutQueueMsg::Wake));
             }
         }
-    }
-
-    pub async fn cancel(&mut self, key: K) {
-        if self.current_waiting.as_ref() == Some(&key) {
-            self.wakeup_send
-                .send(TimeoutQueueMsg::Discard)
-                .await
-                .expect("TimeoutQueue waker dropped when it shouldn't");
-        }
-
-        let mut queue = self.queue.lock().await;
-
-        let vec = queue
-            .drain()
-            .filter(|item| item.item.0 != key)
-            .collect::<Vec<_>>();
-
-        queue.extend(vec);
     }
 }
 

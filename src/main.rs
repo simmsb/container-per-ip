@@ -2,8 +2,6 @@ use bollard::Docker;
 use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
 
-use tokio::prelude::*;
-
 mod connections;
 mod container_mgmt;
 mod timeout_queue;
