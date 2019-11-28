@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use snafu::{ResultExt, Snafu};
 
-use log::{debug, info};
+use multi_map::MultiMap;
+
+use log::{debug, error, info};
 
 use futures::future::FutureExt;
 use futures::select;
@@ -16,6 +18,7 @@ use tokio_timer::DelayQueue;
 
 use crate::container_mgmt::{new_container, ContainerID, DeployedContainer};
 use crate::single_consumer::SingleConsumer;
+use crate::{DOCKER, OPTS};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -27,8 +30,11 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-enum ConnectionEvent {
+#[derive(Debug)]
+pub enum ConnectionEvent {
+    ConnCreate(SocketAddr, u16, TcpStream),
     ConnClosed(SocketAddr),
+    ContainerClosed(ContainerID),
 }
 
 #[derive(Debug)]
@@ -57,24 +63,12 @@ impl ActiveConnection {
 
 async fn container_reaper(
     timeout: Duration,
+    mut events: mpsc::UnboundedSender<ConnectionEvent>,
     mut receiver: mpsc::UnboundedReceiver<SingleConsumer<DeployedContainer>>,
 ) {
-    enum Action {
-        Add(SingleConsumer<DeployedContainer>),
-        Reap(SingleConsumer<DeployedContainer>),
-    }
+    use bollard::container::KillContainerOptions;
 
     let mut delay_queue = DelayQueue::new();
-    // let delay_queue = Arc::new(TimeoutQueue::new());
-    // let (canc_send, canc_recv) = mpsc::unbounded_channel();
-
-    // tokio::spawn(async move {
-    //     while let Some(to_cancel) = delay_queue.pop().await {
-    //         if canc_send.try_send(to_cancel).is_err() {
-    //             break;
-    //         }
-    //     }
-    // });
 
     loop {
         select! {
@@ -87,7 +81,11 @@ async fn container_reaper(
                 if let Some(Ok(to_reap)) = to_reap {
                     // if this is None, it means the reaping was cancelled
                     if let Some(container) = to_reap.into_inner().take() {
-                        // TODO: stop and remove container
+                        let _ = DOCKER.kill_container(
+                            &container.id.clone().into_inner(),
+                            None::<KillContainerOptions<String>>
+                        ).await;
+                        let _ = events.try_send(ConnectionEvent::ContainerClosed(container.id));
                     }
                 }
             }
@@ -121,7 +119,7 @@ async fn rx_tx_loop(
 }
 
 #[derive(Debug)]
-pub struct InnerContext {
+pub struct Context {
     event_chan: (
         mpsc::UnboundedSender<ConnectionEvent>,
         mpsc::UnboundedReceiver<ConnectionEvent>,
@@ -137,10 +135,52 @@ pub struct InnerContext {
 
     // disconnected containers, contains the same receivers of disconnected containers
     // as `containers_to_reap` and is used to bring disconnected containers back alive
-    disconnected_containers: HashMap<IpAddr, SingleConsumer<DeployedContainer>>,
+    disconnected_containers: MultiMap<IpAddr, ContainerID, SingleConsumer<DeployedContainer>>,
 }
 
-impl InnerContext {
+impl Context {
+    pub fn new() -> (mpsc::UnboundedSender<ConnectionEvent>, Context) {
+        let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+        let (reap_tx, reap_rx) = mpsc::unbounded_channel();
+
+        tokio::spawn(container_reaper(
+            Duration::from_secs(OPTS.timeout as u64),
+            evt_tx.clone(),
+            reap_rx,
+        ));
+
+        let ctx = Context {
+            event_chan: (evt_tx.clone(), evt_rx),
+            active_connections: HashMap::new(),
+            active_containers: HashMap::new(),
+            containers_to_reap: reap_tx,
+            disconnected_containers: MultiMap::new(),
+        };
+
+        (evt_tx, ctx)
+    }
+
+    pub async fn handle_events(mut self) {
+        while let Some(evt) = self.event_chan.1.recv().await {
+            match evt {
+                ConnectionEvent::ConnCreate(addr, port, socket) => {
+                    if let Err(e) = self.create_connection_for(addr, port, socket).await {
+                        error!(
+                            "Failed creating connection for container from {} on port {}: {:?}",
+                            addr, port, e
+                        );
+                    }
+                }
+                ConnectionEvent::ConnClosed(addr) => {
+                    self.close_connection(addr).await;
+                }
+                ConnectionEvent::ContainerClosed(container_id) => {
+                    self.disconnected_containers.remove_alt(&container_id);
+                }
+            }
+        }
+    }
+
     async fn create_connection_for(
         &mut self,
         client_addr: SocketAddr,
@@ -150,17 +190,21 @@ impl InnerContext {
         if let Some(container) = self.disconnected_containers.remove(&client_addr.ip()) {
             if let Some(container) = container.take() {
                 // removal of this container has now been cancelled, we can use it
-                info!("Container for {} that was on the reap queue moved back to being alive.", client_addr.ip());
-                self.active_containers.insert(
-                    client_addr.ip(),
-                    (1, container.clone())
+                info!(
+                    "Container for {} that was on the reap queue moved back to being alive.",
+                    client_addr.ip()
                 );
+                self.active_containers
+                    .insert(client_addr.ip(), (1, container.clone()));
                 return self
                     .create_connection(client_addr, port, client_stream, container)
                     .await;
             }
 
-            debug!("Container for {} evicted before we could cancel eviction.", client_addr.ip());
+            debug!(
+                "Container for {} evicted before we could cancel eviction.",
+                client_addr.ip()
+            );
             // otherwise fall through to below and create a new container
         }
 
@@ -169,12 +213,13 @@ impl InnerContext {
                 *count += 1;
                 container.clone()
             } else {
-                info!("Incoming initial connection from {}, creating new container.", client_addr.ip());
-                let container = new_container().await.context(ContainerMgmt)?;
-                self.active_containers.insert(
-                    client_addr.ip(),
-                    (1, container.clone()),
+                info!(
+                    "Incoming initial connection from {}, creating new container.",
+                    client_addr.ip()
                 );
+                let container = new_container().await.context(ContainerMgmt)?;
+                self.active_containers
+                    .insert(client_addr.ip(), (1, container.clone()));
                 container
             };
 
@@ -224,17 +269,17 @@ impl InnerContext {
 
         if active_container.0 == 0 {
             // no more entries, move the con
-            let active_container = self
-                .active_containers
-                .remove(&client_addr.ip())
-                .unwrap();
+            let active_container = self.active_containers.remove(&client_addr.ip()).unwrap();
             let wrapped_container = SingleConsumer::new(active_container.1.clone());
 
             self.containers_to_reap
                 .try_send(wrapped_container.clone())
                 .unwrap();
-            self.disconnected_containers
-                .insert(client_addr.ip(), wrapped_container);
+            self.disconnected_containers.insert(
+                client_addr.ip(),
+                active_container.1.id,
+                wrapped_container,
+            );
         }
     }
 }

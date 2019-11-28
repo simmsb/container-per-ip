@@ -34,7 +34,13 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContainerID(String);
 
-#[derive(Debug, Clone)]
+impl ContainerID {
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeployedContainer {
     pub(crate) id: ContainerID,
     pub(crate) ip_address: IpAddr,
