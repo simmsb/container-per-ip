@@ -1,10 +1,18 @@
 use bollard::Docker;
 use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
+use lazy_static::lazy_static;
 
 mod connections;
 mod container_mgmt;
-mod timeout_queue;
+mod single_consumer;
+
+lazy_static! {
+    static ref DOCKER: Docker =
+        Docker::connect_with_local_defaults().context(DockerError).unwrap();
+
+    static ref OPTS: Opt = Opt::from_args();
+}
 
 #[derive(Debug, Snafu)]
 enum Error {
@@ -37,12 +45,9 @@ pub struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let opt = Opt::from_args();
-    println!("{:?}", opt);
+    println!("{:?}", *OPTS);
 
-    let docker = Docker::connect_with_local_defaults().context(DockerError)?;
-
-    let version = docker.version().await.context(DockerError)?;
+    let version = DOCKER.version().await.context(DockerError)?;
 
     println!("Docker version: {:?}", version);
 

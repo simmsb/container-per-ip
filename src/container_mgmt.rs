@@ -10,7 +10,7 @@ use snafu::{ResultExt, Snafu};
 use std::net::IpAddr;
 use tokio::net::TcpStream;
 
-use crate::Opt;
+use crate::{Opt, OPTS, DOCKER};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -90,4 +90,9 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
         id: ContainerID(id),
         ip_address: container.network_settings.ip_address.parse().unwrap(),
     })
+}
+
+/// `deploy_container` but uses global values for docker and opts
+pub async fn new_container() -> Result<DeployedContainer> {
+    deploy_container(&DOCKER, &OPTS).await
 }
