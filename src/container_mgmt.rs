@@ -10,7 +10,7 @@ use snafu::{ResultExt, Snafu};
 use std::net::IpAddr;
 use tokio::net::TcpStream;
 
-use crate::{Opt, OPTS, DOCKER};
+use crate::{Opt, DOCKER, OPTS};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -38,6 +38,10 @@ impl ContainerID {
     pub fn into_inner(self) -> String {
         self.0
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -64,6 +68,7 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
         image: Some(opts.image.as_str()),
         host_config: Some(HostConfig {
             privileged: if opts.privileged { Some(true) } else { None },
+            binds: Some(opts.binds.iter().map(|x| x.as_str()).collect()),
             ..Default::default()
         }),
         ..Default::default()
@@ -101,4 +106,12 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
 /// `deploy_container` but uses global values for docker and opts
 pub async fn new_container() -> Result<DeployedContainer> {
     deploy_container(&DOCKER, &OPTS).await
+}
+
+pub async fn kill_container(id: &ContainerID) {
+    use bollard::container::KillContainerOptions;
+
+    let _ = DOCKER
+        .kill_container(id.as_str(), None::<KillContainerOptions<String>>)
+        .await;
 }

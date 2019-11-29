@@ -16,9 +16,9 @@ use tokio::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 use tokio_timer::DelayQueue;
 
-use crate::container_mgmt::{new_container, ContainerID, DeployedContainer};
+use crate::container_mgmt::{new_container, kill_container, ContainerID, DeployedContainer};
 use crate::single_consumer::SingleConsumer;
-use crate::{DOCKER, OPTS};
+use crate::OPTS;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -35,6 +35,7 @@ pub enum ConnectionEvent {
     ConnCreate(SocketAddr, u16, TcpStream),
     ConnClosed(SocketAddr),
     ContainerClosed(ContainerID),
+    SIGINTSent,
 }
 
 #[derive(Debug)]
@@ -65,13 +66,19 @@ async fn container_reaper(
     timeout: Duration,
     mut events: mpsc::UnboundedSender<ConnectionEvent>,
     mut receiver: mpsc::UnboundedReceiver<SingleConsumer<DeployedContainer>>,
+    stop: oneshot::Receiver<()>,
 ) {
-    use bollard::container::KillContainerOptions;
-
     let mut delay_queue = DelayQueue::new();
+    let mut stop = FutureExt::fuse(stop);
+
+    info!("Starting reaper");
 
     loop {
         select! {
+            _ = stop => {
+                info!("Stopping reaper");
+                return;
+            }
             to_add = FutureExt::fuse(receiver.recv()) => {
                 if let Some(to_add) = to_add {
                     delay_queue.insert(to_add, timeout);
@@ -81,11 +88,10 @@ async fn container_reaper(
                 if let Some(Ok(to_reap)) = to_reap {
                     // if this is None, it means the reaping was cancelled
                     if let Some(container) = to_reap.into_inner().take() {
-                        let container_id = container.id.clone().into_inner();
-                        let _ = DOCKER.kill_container(
-                            &container_id,
-                            None::<KillContainerOptions<String>>
-                        ).await;
+                        info!("Shutting down container {:?}", container.id);
+
+                        kill_container(&container.id).await;
+
                         let _ = events.try_send(ConnectionEvent::ContainerClosed(container.id));
                     }
                 }
@@ -126,6 +132,10 @@ pub struct Context {
         mpsc::UnboundedReceiver<ConnectionEvent>,
     ),
 
+    listener_stop_txs: Vec<oneshot::Sender<()>>,
+
+    reaper_stop_tx: oneshot::Sender<()>,
+
     // ongoing active connections
     active_connections: HashMap<SocketAddr, ActiveConnection>,
 
@@ -140,18 +150,22 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new() -> (mpsc::UnboundedSender<ConnectionEvent>, Context) {
+    pub fn new(listener_stop_txs: Vec<oneshot::Sender<()>>) -> (mpsc::UnboundedSender<ConnectionEvent>, Context) {
         let (evt_tx, evt_rx) = mpsc::unbounded_channel();
         let (reap_tx, reap_rx) = mpsc::unbounded_channel();
+        let (reaper_stop_tx, reaper_stop_rx) = oneshot::channel();
 
         tokio::spawn(container_reaper(
             Duration::from_secs(OPTS.timeout as u64),
             evt_tx.clone(),
             reap_rx,
+            reaper_stop_rx,
         ));
 
         let ctx = Context {
             event_chan: (evt_tx.clone(), evt_rx),
+            listener_stop_txs,
+            reaper_stop_tx,
             active_connections: HashMap::new(),
             active_containers: HashMap::new(),
             containers_to_reap: reap_tx,
@@ -177,6 +191,32 @@ impl Context {
                 }
                 ConnectionEvent::ContainerClosed(container_id) => {
                     self.disconnected_containers.remove_alt(&container_id);
+                },
+                ConnectionEvent::SIGINTSent => {
+                    // oopsie
+                    info!("Got SIGINT, killing all containers");
+
+                    let _ = self.reaper_stop_tx.send(());
+
+                    for closer in self.listener_stop_txs {
+                        let _ = closer.send(());
+                    }
+
+                    for (_, conn) in self.active_connections.drain() {
+                        let _ = conn.should_close.send(());
+                    }
+
+                    for (_, container) in self.active_containers.values() {
+                        kill_container(&container.id).await;
+                    }
+
+                    for (_, (_, container_c)) in self.disconnected_containers.iter() {
+                        if let Some(container) = container_c.take() {
+                            kill_container(&container.id).await;
+                        }
+                    }
+
+                    return;
                 }
             }
         }
@@ -269,7 +309,10 @@ impl Context {
         active_container.0 -= 1;
 
         if active_container.0 == 0 {
-            // no more entries, move the con
+            // no more entries, move the container to the reap queue
+
+            info!("Last connection to container {:?} gone, moving to reap queue", active_container.1.id);
+
             let active_container = self.active_containers.remove(&client_addr.ip()).unwrap();
             let wrapped_container = SingleConsumer::new(active_container.1.clone());
 
