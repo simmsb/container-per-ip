@@ -81,8 +81,9 @@ async fn container_reaper(
                 if let Some(Ok(to_reap)) = to_reap {
                     // if this is None, it means the reaping was cancelled
                     if let Some(container) = to_reap.into_inner().take() {
+                        let container_id = container.id.clone().into_inner();
                         let _ = DOCKER.kill_container(
-                            &container.id.clone().into_inner(),
+                            &container_id,
                             None::<KillContainerOptions<String>>
                         ).await;
                         let _ = events.try_send(ConnectionEvent::ContainerClosed(container.id));
