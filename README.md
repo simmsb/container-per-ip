@@ -1,2 +1,24 @@
 # container-per-ip
 Some thing so you can spin up a container per client ip
+
+```
+container-per-ip 0.1.0
+Run a container per client ip
+
+USAGE:
+    container-per-ip [FLAGS] [OPTIONS] <image>
+
+FLAGS:
+    -h, --help          Prints help information
+        --privileged    Should the containers be started with the `--privileged` flag
+    -V, --version       Prints version information
+
+OPTIONS:
+    -b, --binds <binds>...     Volume bindings to provide to containers
+    -p, --ports <ports>...     Ports to listen on (tcp only currently)
+    -t, --timeout <timeout>    Timeout (seconds) after an IPs last connection disconnects before killing the associated
+                               container [default: 300]
+
+ARGS:
+    <image>    The docker image to run for each ip
+```
