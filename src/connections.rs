@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -9,12 +12,16 @@ use multi_map::MultiMap;
 use log::{debug, error, info};
 
 use futures::future::FutureExt;
+use futures::pin_mut;
 use futures::select;
 
+use pin_utils::unsafe_pinned;
+
+use tokio::io;
 use tokio::net::TcpStream;
-use tokio::prelude::*;
 use tokio::sync::{mpsc, oneshot};
-use tokio_timer::DelayQueue;
+use tokio::time::DelayQueue;
+use tokio::stream::StreamExt;
 
 use crate::container_mgmt::{new_container, kill_container, ContainerID, DeployedContainer};
 use crate::single_consumer::SingleConsumer;
@@ -58,41 +65,69 @@ impl ActiveConnection {
     }
 }
 
-// // queue of containers that are disconnected, item type is a oneshot receiver to
-// // allow for containers to be removed from the queue once they are reconnected
-// containers_to_reap: TimeoutQueue<oneshot::Receiver<DeployedContainer>>,
+struct UnfuseFut<Fut> {
+    future: Fut,
+}
+
+impl<Fut> UnfuseFut<Fut> {
+    fn new(future: Fut) -> Self {
+        UnfuseFut {
+            future
+        }
+    }
+
+    unsafe_pinned!(future: Fut);
+
+}
+
+impl<Fut: Unpin> Unpin for UnfuseFut<Fut> {}
+
+impl<Fut: Future<Output = Option<T>>, T> Future for UnfuseFut<Fut> {
+    type Output = T;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut futures::task::Context<'_>) -> Poll<Self::Output> {
+        match self.as_mut().future().poll(cx) {
+            Poll::Ready(None) => Poll::Pending,
+            Poll::Ready(Some(x)) => Poll::Ready(x),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 async fn container_reaper(
     timeout: Duration,
-    mut events: mpsc::UnboundedSender<ConnectionEvent>,
+    events: mpsc::UnboundedSender<ConnectionEvent>,
     mut receiver: mpsc::UnboundedReceiver<SingleConsumer<DeployedContainer>>,
     stop: oneshot::Receiver<()>,
 ) {
     let mut delay_queue = DelayQueue::new();
-    let mut stop = FutureExt::fuse(stop);
-
+    let mut stop = stop.fuse();
     info!("Starting reaper");
 
     loop {
+        let receiver_recv = receiver.recv().fuse();
+        let delay_queue_next = UnfuseFut::new(delay_queue.next()).fuse();
+        pin_mut!(receiver_recv, delay_queue_next);
+
         select! {
             _ = stop => {
                 info!("Stopping reaper");
                 return;
-            }
-            to_add = FutureExt::fuse(receiver.recv()) => {
+            },
+            to_add = receiver_recv => {
                 if let Some(to_add) = to_add {
                     delay_queue.insert(to_add, timeout);
                 }
             },
-            to_reap = FutureExt::fuse(delay_queue.next()) => {
-                if let Some(Ok(to_reap)) = to_reap {
+            to_reap = delay_queue_next => {
+                if let Ok(to_reap) = to_reap {
                     // if this is None, it means the reaping was cancelled
                     if let Some(container) = to_reap.into_inner().take() {
                         info!("Shutting down container {:?}", container.id);
 
                         kill_container(&container.id).await;
 
-                        let _ = events.try_send(ConnectionEvent::ContainerClosed(container.id));
+                        let _ = events.send(ConnectionEvent::ContainerClosed(container.id));
                     }
                 }
             }
@@ -105,7 +140,7 @@ async fn rx_tx_loop(
     mut lhs: TcpStream,
     mut rhs: TcpStream,
     close: oneshot::Receiver<()>,
-    mut events: mpsc::UnboundedSender<ConnectionEvent>,
+    events: mpsc::UnboundedSender<ConnectionEvent>,
 ) {
     let (mut lhs_r, mut lhs_w) = lhs.split();
     let (mut rhs_r, mut rhs_w) = rhs.split();
@@ -114,13 +149,13 @@ async fn rx_tx_loop(
         _ = FutureExt::fuse(close) => {
             debug!("Stopping transmission ({:?} <--> {:?}) commanded to stop.", lhs, rhs);
         },
-        _ = FutureExt::fuse(lhs_r.copy(&mut rhs_w)) => {
+        _ = FutureExt::fuse(io::copy(&mut lhs_r, &mut rhs_w)) => {
             debug!("Stopping transmission ({:?} <--> {:?}) rhs_w or lhs_r closed.", lhs, rhs);
-            let _ = events.try_send(ConnectionEvent::ConnClosed(addr));
+            let _ = events.send(ConnectionEvent::ConnClosed(addr));
         },
-        _ = FutureExt::fuse(rhs_r.copy(&mut lhs_w)) => {
+        _ = FutureExt::fuse(io::copy(&mut rhs_r, &mut lhs_w)) => {
             debug!("Stopping transmission ({:?} <--> {:?}) lhs_w or rhs_r closed.", lhs, rhs);
-            let _ = events.try_send(ConnectionEvent::ConnClosed(addr));
+            let _ = events.send(ConnectionEvent::ConnClosed(addr));
         },
     }
 }
@@ -194,7 +229,7 @@ impl Context {
                 },
                 ConnectionEvent::SIGINTSent => {
                     // oopsie
-                    info!("Got SIGINT, killing all containers");
+                    info!("Got SIGINT, killing all connections and containers");
 
                     let _ = self.reaper_stop_tx.send(());
 
@@ -317,7 +352,7 @@ impl Context {
             let wrapped_container = SingleConsumer::new(active_container.1.clone());
 
             self.containers_to_reap
-                .try_send(wrapped_container.clone())
+                .send(wrapped_container.clone())
                 .unwrap();
             self.disconnected_containers.insert(
                 client_addr.ip(),

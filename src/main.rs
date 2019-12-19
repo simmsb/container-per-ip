@@ -4,8 +4,8 @@ use bollard::Docker;
 use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
 use lazy_static::lazy_static;
-
 use tokio::sync::oneshot;
+use log::{info, debug};
 
 mod connections;
 mod container_mgmt;
@@ -23,6 +23,8 @@ lazy_static! {
 enum Error {
     #[snafu(display("An error occured with docker: {}", source))]
     DockerError { source: bollard::errors::Error },
+    #[snafu(display("An error occured joining tokio handles {}", source))]
+    TokioJoinError { source: tokio::task::JoinError },
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -60,29 +62,36 @@ async fn main() -> Result<()> {
         .start()
         .unwrap();
 
-    println!("{:?}", *OPTS);
-
     let version = DOCKER.version().await.context(DockerError)?;
 
-    println!("Docker version: {:?}", version);
+    debug!("Docker version: {:?}", version);
 
     let (listener_stop_tx, listener_stop_rx): (Vec<_>, Vec<_>) =
         OPTS.ports.iter().map(|_| oneshot::channel()).unzip();
 
     let (evt_tx, context) = connections::Context::new(listener_stop_tx);
 
-    for (port, stop_rx) in OPTS.ports.iter().zip(listener_stop_rx) {
-        tokio::spawn(listener::listen_on(*port, evt_tx.clone(), stop_rx));
-    }
+    let listener_handles = OPTS.ports.iter().zip(listener_stop_rx)
+        .map(|(port, stop_rx)|
+             tokio::spawn(listener::listen_on(*port, evt_tx.clone(), stop_rx)))
+        .collect::<Vec<_>>();
+
+    debug!("Started listeners");
 
     ctrlc::set_handler(move || {
-        let mut evt_tx = evt_tx.clone();
-        let _ = evt_tx.try_send(connections::ConnectionEvent::SIGINTSent);
+        let evt_tx = evt_tx.clone();
+        let _ = evt_tx.send(connections::ConnectionEvent::SIGINTSent);
     }).unwrap();
+
+    debug!("Set C-c handler");
 
     context.handle_events().await;
 
-    println!("Bye");
+    for handle in listener_handles {
+        handle.await.context(TokioJoinError)?;
+    }
+
+    info!("Bye");
 
     Ok(())
 }
