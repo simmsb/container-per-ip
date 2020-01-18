@@ -1,6 +1,12 @@
 # container-per-ip
 Some thing so you can spin up a container per client ip
 
+This works by spawning a new container based on the host address of a connecting
+client.
+
+Concurrent tcp connections route to the same container, containers are removed
+when a timeout has elapsed since the last connection closed.
+
 ```
 container-per-ip 0.1.0
 Run a container per client ip
