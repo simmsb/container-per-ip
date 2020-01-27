@@ -28,3 +28,13 @@ OPTIONS:
 ARGS:
     <image>    The docker image to run for each ip
 ```
+
+## Running in docker
+
+```
+# build (if needed)
+docker build -t container-per-ip .
+
+# run
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --net=host -it container-per-ip --help
+```
