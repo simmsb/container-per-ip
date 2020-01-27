@@ -136,8 +136,8 @@ async fn main() -> Result<()> {
             Ok(handle) => listener_handles.push(handle),
             Err(e) => {
                 error!("Failed spawning a listener, aborting");
+                error!("Reason: {}", e);
                 let _ = evt_tx.send(connections::ConnectionEvent::Stop);
-                eprintln!("{}", e);
                 break;
             }
         }
