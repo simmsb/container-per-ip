@@ -1,21 +1,22 @@
-#![recursion_limit="256"]
+#![recursion_limit = "256"]
 
+use std::collections::HashSet;
 use bollard::Docker;
+use lazy_static::lazy_static;
+use log::{debug, info};
 use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
-use lazy_static::lazy_static;
 use tokio::sync::oneshot;
-use log::{info, debug};
 
 mod connections;
 mod container_mgmt;
-mod single_consumer;
 mod listener;
+mod single_consumer;
 
 lazy_static! {
-    static ref DOCKER: Docker =
-        Docker::connect_with_local_defaults().context(DockerError).unwrap();
-
+    static ref DOCKER: Docker = Docker::connect_with_local_defaults()
+        .context(DockerError)
+        .unwrap();
     static ref OPTS: Opt = Opt::from_args();
 }
 
@@ -29,6 +30,39 @@ enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
+#[derive(Debug, Snafu)]
+enum ParsePortError {
+    #[snafu(display("Invalid port range: {} (parsed as: {})", range, parse))]
+    InvalidPortRange { range: String, parse: String },
+    #[snafu(display("Failed to parse lhs of port range: {}", source))]
+    LHSInvalid { source: std::num::ParseIntError },
+    #[snafu(display("Failed to parse rhs of port range: {}", source))]
+    RHSInvalid { source: std::num::ParseIntError },
+}
+
+fn parse_ports(src: &str) -> Result<Vec<u16>, ParsePortError> {
+    if let Ok(x) = src.parse::<u16>() {
+        return Ok(vec![x]);
+    }
+
+    let range: Vec<_> = src.split('-').collect();
+    let (l, r) = match range.as_slice() {
+        [l, r] => (l, r),
+        x => {
+            return InvalidPortRange {
+                range: src.to_string(),
+                parse: format!("{:?}", x),
+            }
+            .fail()
+        }
+    };
+
+    let l = l.parse::<u16>().context(LHSInvalid)?;
+    let r = r.parse::<u16>().context(RHSInvalid)?;
+
+    Ok((l..r).collect())
+}
+
 #[derive(Debug, StructOpt)]
 #[structopt(name = "container-per-ip", about = "Run a container per client ip")]
 pub struct Opt {
@@ -40,9 +74,9 @@ pub struct Opt {
     /// Should the containers be started with the `--privileged` flag
     pub privileged: bool,
 
-    #[structopt(short, long)]
+    #[structopt(short, long, parse(try_from_str = parse_ports))]
     /// Ports to listen on (tcp only currently)
-    pub ports: Vec<u16>,
+    pub ports: Vec<Vec<u16>>,
 
     #[structopt(short, long)]
     /// Volume bindings to provide to containers
@@ -66,14 +100,19 @@ async fn main() -> Result<()> {
 
     debug!("Docker version: {:?}", version);
 
-    let (listener_stop_tx, listener_stop_rx): (Vec<_>, Vec<_>) =
-        OPTS.ports.iter().map(|_| oneshot::channel()).unzip();
+    let ports: HashSet<_> = OPTS.ports.iter().flatten().cloned().collect();
+
+    let (listener_stop_tx, listener_stop_rx): (Vec<_>, Vec<_>) = ports
+        .iter()
+        .map(|_| oneshot::channel())
+        .unzip();
 
     let (evt_tx, context) = connections::Context::new(listener_stop_tx);
 
-    let listener_handles = OPTS.ports.iter().zip(listener_stop_rx)
-        .map(|(port, stop_rx)|
-             tokio::spawn(listener::listen_on(*port, evt_tx.clone(), stop_rx)))
+    let listener_handles = ports
+        .iter()
+        .zip(listener_stop_rx)
+        .map(|(port, stop_rx)| tokio::spawn(listener::listen_on(*port, evt_tx.clone(), stop_rx)))
         .collect::<Vec<_>>();
 
     debug!("Started listeners");
@@ -81,7 +120,8 @@ async fn main() -> Result<()> {
     ctrlc::set_handler(move || {
         let evt_tx = evt_tx.clone();
         let _ = evt_tx.send(connections::ConnectionEvent::SIGINTSent);
-    }).unwrap();
+    })
+    .unwrap();
 
     debug!("Set C-c handler");
 
