@@ -42,7 +42,7 @@ pub enum ConnectionEvent {
     ConnCreate(SocketAddr, u16, TcpStream),
     ConnClosed(SocketAddr),
     ContainerClosed(ContainerID),
-    SIGINTSent,
+    Stop,
 }
 
 #[derive(Debug)]
@@ -227,9 +227,9 @@ impl Context {
                 ConnectionEvent::ContainerClosed(container_id) => {
                     self.disconnected_containers.remove_alt(&container_id);
                 },
-                ConnectionEvent::SIGINTSent => {
+                ConnectionEvent::Stop => {
                     // oopsie
-                    info!("Got SIGINT, killing all connections and containers");
+                    info!("Stopping, killing all connections and containers");
 
                     let _ = self.reaper_stop_tx.send(());
 

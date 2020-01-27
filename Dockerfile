@@ -1,6 +1,16 @@
 FROM clux/muslrust:latest AS build
 
-RUN cargo install --git https://github.com/nitros12/container-per-ip
+WORKDIR /opt/container-per-ip/
+
+COPY Cargo.toml .
+COPY Cargo.lock .
+RUN mkdir .cargo
+RUN cargo vendor > .cargo/config
+
+COPY src src
+
+RUN cargo build --release
+RUN cargo install --path . --verbose
 
 FROM docker:latest
 

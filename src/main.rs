@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use bollard::Docker;
 use lazy_static::lazy_static;
-use log::{debug, info};
+use log::{debug, info, error};
 use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
 use tokio::sync::oneshot;
@@ -24,6 +24,8 @@ lazy_static! {
 enum Error {
     #[snafu(display("An error occured with docker: {}", source))]
     DockerError { source: bollard::errors::Error },
+    #[snafu(display("An error occured creating a listener: {}", source))]
+    ListenerSpawnError { source: listener::Error },
     #[snafu(display("An error occured joining tokio handles {}", source))]
     TokioJoinError { source: tokio::task::JoinError },
 }
@@ -109,26 +111,42 @@ async fn main() -> Result<()> {
 
     let (evt_tx, context) = connections::Context::new(listener_stop_tx);
 
-    let listener_handles = ports
-        .iter()
-        .zip(listener_stop_rx)
-        .map(|(port, stop_rx)| tokio::spawn(listener::listen_on(*port, evt_tx.clone(), stop_rx)))
-        .collect::<Vec<_>>();
+    debug!("Setting C-c handler");
 
-    debug!("Started listeners");
-
-    ctrlc::set_handler(move || {
+    ctrlc::set_handler({
         let evt_tx = evt_tx.clone();
-        let _ = evt_tx.send(connections::ConnectionEvent::SIGINTSent);
+        move || {
+            let _ = evt_tx.send(connections::ConnectionEvent::Stop);
+        }
     })
     .unwrap();
 
-    debug!("Set C-c handler");
+    debug!("Starting listeners");
+
+    let listener_handles_fut = ports
+        .iter()
+        .zip(listener_stop_rx)
+        .map(|(port, stop_rx)| listener::listen_on(*port, evt_tx.clone(), stop_rx))
+        .collect::<Vec<_>>();
+
+    let mut listener_handles = Vec::with_capacity(listener_handles_fut.len());
+
+    for fut in listener_handles_fut {
+        match fut.await.context(ListenerSpawnError) {
+            Ok(handle) => listener_handles.push(handle),
+            Err(e) => {
+                error!("Failed spawning a listener, aborting");
+                let _ = evt_tx.send(connections::ConnectionEvent::Stop);
+                eprintln!("{}", e);
+                break;
+            }
+        }
+    };
 
     context.handle_events().await;
 
     for handle in listener_handles {
-        handle.await.context(TokioJoinError)?;
+        let _ = handle.await;
     }
 
     info!("Bye");
