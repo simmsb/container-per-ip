@@ -3,7 +3,6 @@ FROM clux/muslrust:latest AS build
 WORKDIR /opt/container-per-ip/
 
 COPY Cargo.toml .
-COPY Cargo.lock .
 RUN mkdir .cargo
 RUN cargo vendor > .cargo/config
 
