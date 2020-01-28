@@ -11,12 +11,9 @@ use multi_map::MultiMap;
 
 use log::{debug, error, info};
 
-use futures::future::FutureExt;
-use futures::pin_mut;
-use futures::select;
-
 use pin_utils::unsafe_pinned;
 
+use tokio::select;
 use tokio::io;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -77,7 +74,6 @@ impl<Fut> UnfuseFut<Fut> {
     }
 
     unsafe_pinned!(future: Fut);
-
 }
 
 impl<Fut: Unpin> Unpin for UnfuseFut<Fut> {}
@@ -98,28 +94,23 @@ async fn container_reaper(
     timeout: Duration,
     events: mpsc::UnboundedSender<ConnectionEvent>,
     mut receiver: mpsc::UnboundedReceiver<SingleConsumer<DeployedContainer>>,
-    stop: oneshot::Receiver<()>,
+    mut stop: oneshot::Receiver<()>,
 ) {
     let mut delay_queue = DelayQueue::new();
-    let mut stop = stop.fuse();
     info!("Starting reaper");
 
     loop {
-        let receiver_recv = receiver.recv().fuse();
-        let delay_queue_next = UnfuseFut::new(delay_queue.next()).fuse();
-        pin_mut!(receiver_recv, delay_queue_next);
-
         select! {
-            _ = stop => {
+            _ = &mut stop => {
                 info!("Stopping reaper");
                 return;
             },
-            to_add = receiver_recv => {
+            to_add = receiver.recv() => {
                 if let Some(to_add) = to_add {
                     delay_queue.insert(to_add, timeout);
                 }
             },
-            to_reap = delay_queue_next => {
+            to_reap = UnfuseFut::new(delay_queue.next()) => {
                 if let Ok(to_reap) = to_reap {
                     // if this is None, it means the reaping was cancelled
                     if let Some(container) = to_reap.into_inner().take() {
@@ -146,14 +137,14 @@ async fn rx_tx_loop(
     let (mut rhs_r, mut rhs_w) = rhs.split();
 
     select! {
-        _ = FutureExt::fuse(close) => {
+        _ = close => {
             debug!("Stopping transmission ({:?} <--> {:?}) commanded to stop.", lhs, rhs);
         },
-        _ = FutureExt::fuse(io::copy(&mut lhs_r, &mut rhs_w)) => {
+        _ = io::copy(&mut lhs_r, &mut rhs_w) => {
             debug!("Stopping transmission ({:?} <--> {:?}) rhs_w or lhs_r closed.", lhs, rhs);
             let _ = events.send(ConnectionEvent::ConnClosed(addr));
         },
-        _ = FutureExt::fuse(io::copy(&mut rhs_r, &mut lhs_w)) => {
+        _ = io::copy(&mut rhs_r, &mut lhs_w) => {
             debug!("Stopping transmission ({:?} <--> {:?}) lhs_w or rhs_r closed.", lhs, rhs);
             let _ = events.send(ConnectionEvent::ConnClosed(addr));
         },
