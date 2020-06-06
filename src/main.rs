@@ -70,23 +70,23 @@ fn parse_ports(src: &str) -> Result<Vec<u16>, ParsePortError> {
 #[derive(Debug, StructOpt)]
 #[structopt(name = "container-per-ip", about = "Run a container per client ip", author = "Ben Simms <ben@bensimms.moe>")]
 pub struct Opt {
-    #[structopt(env)]
+    #[structopt()]
     /// The docker image to run for each ip
     pub image: String,
 
-    #[structopt(long, env)]
+    #[structopt(long)]
     /// Should the containers be started with the `--privileged` flag
     pub privileged: bool,
 
-    #[structopt(short, long, parse(try_from_str = parse_ports), env)]
+    #[structopt(short, long, parse(try_from_str = parse_ports))]
     /// Ports to listen on (tcp only currently)
     pub ports: Vec<Vec<u16>>,
 
-    #[structopt(short, long, env)]
+    #[structopt(short, long)]
     /// Volume bindings to provide to containers
     pub binds: Vec<String>,
 
-    #[structopt(short, long, default_value = "300", env)]
+    #[structopt(short, long, default_value = "300")]
     /// Timeout (seconds) after an IPs last connection disconnects before
     /// killing the associated container
     pub timeout: u16,

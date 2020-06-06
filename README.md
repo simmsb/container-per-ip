@@ -8,7 +8,8 @@ Concurrent tcp connections route to the same container, containers are removed
 when a timeout has elapsed since the last connection closed.
 
 ```
-container-per-ip 0.1.0
+container-per-ip 0.1.2
+Ben Simms <ben@bensimms.moe>
 Run a container per client ip
 
 USAGE:
@@ -32,9 +33,5 @@ ARGS:
 ## Running in docker
 
 ```
-# build (if needed)
-docker build -t container-per-ip .
-
-# run
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --net=host -it container-per-ip --help
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --net=host -it nitros12/container-per-ip --help
 ```
