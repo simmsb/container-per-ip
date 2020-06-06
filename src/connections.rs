@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::DelayQueue;
 use tokio::stream::StreamExt;
 
-use crate::container_mgmt::{new_container, kill_container, ContainerID, DeployedContainer};
+use crate::container_mgmt::{new_container, remove_container, ContainerID, DeployedContainer};
 use crate::single_consumer::SingleConsumer;
 use crate::OPTS;
 
@@ -116,9 +116,9 @@ async fn container_reaper(
                     if let Some(container) = to_reap.into_inner().take() {
                         info!("Shutting down container {:?}", container.id);
 
-                        kill_container(&container.id).await;
+                        remove_container(&container.id).await;
 
-                        let _ = events.send(ConnectionEvent::ContainerClosed(container.id));
+                        error_on_error!(events.send(ConnectionEvent::ContainerClosed(container.id)));
                     }
                 }
             }
@@ -142,11 +142,11 @@ async fn rx_tx_loop(
         },
         _ = io::copy(&mut lhs_r, &mut rhs_w) => {
             debug!("Stopping transmission ({:?} <--> {:?}) rhs_w or lhs_r closed.", lhs, rhs);
-            let _ = events.send(ConnectionEvent::ConnClosed(addr));
+            error_on_error!(events.send(ConnectionEvent::ConnClosed(addr)));
         },
         _ = io::copy(&mut rhs_r, &mut lhs_w) => {
             debug!("Stopping transmission ({:?} <--> {:?}) lhs_w or rhs_r closed.", lhs, rhs);
-            let _ = events.send(ConnectionEvent::ConnClosed(addr));
+            error_on_error!(events.send(ConnectionEvent::ConnClosed(addr)));
         },
     }
 }
@@ -207,7 +207,7 @@ impl Context {
                 ConnectionEvent::ConnCreate(addr, port, socket) => {
                     if let Err(e) = self.create_connection_for(addr, port, socket).await {
                         error!(
-                            "Failed creating connection for container from {} on port {}: {:?}",
+                            "Failed creating connection for container from {} on port {}: {}",
                             addr, port, e
                         );
                     }
@@ -222,25 +222,29 @@ impl Context {
                     // oopsie
                     info!("Stopping, killing all connections and containers");
 
-                    let _ = self.reaper_stop_tx.send(());
+                    error_on_error!(self.reaper_stop_tx.send(()));
 
                     for closer in self.listener_stop_txs {
-                        let _ = closer.send(());
+                        error_on_error!(closer.send(()));
                     }
 
                     for (_, conn) in self.active_connections.drain() {
-                        let _ = conn.should_close.send(());
+                        error_on_error!(conn.should_close.send(()));
                     }
 
-                    for (_, container) in self.active_containers.values() {
-                        kill_container(&container.id).await;
+                    // remove all remaining containers in parallel
+                    let mut handles = Vec::new();
+                    for (_, (_, container)) in self.active_containers.drain() {
+                        handles.push(tokio::spawn(async move { remove_container(&container.id).await }));
                     }
 
                     for (_, (_, container_c)) in self.disconnected_containers.iter() {
                         if let Some(container) = container_c.take() {
-                            kill_container(&container.id).await;
+                            handles.push(tokio::spawn(async move { remove_container(&container.id).await }));
                         }
                     }
+
+                    futures::future::join_all(handles).await;
 
                     return;
                 }

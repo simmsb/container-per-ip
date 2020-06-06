@@ -41,9 +41,9 @@ pub async fn listen_on(
                     match r {
                         Ok((socket, addr)) => {
                             info!("Incoming connection from {} on port {}", addr, port);
-                            let _ = events.send(ConnectionEvent::ConnCreate(addr, port, socket));
+                            error_on_error!(events.send(ConnectionEvent::ConnCreate(addr, port, socket)));
                         }
-                        Err(e) => error!("Failed connecting to client on port {}: {:?}", port, e),
+                        Err(e) => error!("Failed connecting to client on port {}: {}", port, e),
                     }
                 }
             }

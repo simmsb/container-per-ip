@@ -8,6 +8,8 @@ use snafu::{ResultExt, Snafu};
 use structopt::StructOpt;
 use tokio::sync::oneshot;
 
+#[macro_use]
+mod utils;
 mod connections;
 mod container_mgmt;
 mod listener;
@@ -66,25 +68,25 @@ fn parse_ports(src: &str) -> Result<Vec<u16>, ParsePortError> {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "container-per-ip", about = "Run a container per client ip")]
+#[structopt(name = "container-per-ip", about = "Run a container per client ip", author = "Ben Simms <ben@bensimms.moe>")]
 pub struct Opt {
-    #[structopt()]
+    #[structopt(env)]
     /// The docker image to run for each ip
     pub image: String,
 
-    #[structopt(long)]
+    #[structopt(long, env)]
     /// Should the containers be started with the `--privileged` flag
     pub privileged: bool,
 
-    #[structopt(short, long, parse(try_from_str = parse_ports))]
+    #[structopt(short, long, parse(try_from_str = parse_ports), env)]
     /// Ports to listen on (tcp only currently)
     pub ports: Vec<Vec<u16>>,
 
-    #[structopt(short, long)]
+    #[structopt(short, long, env)]
     /// Volume bindings to provide to containers
     pub binds: Vec<String>,
 
-    #[structopt(short, long, default_value = "300")]
+    #[structopt(short, long, default_value = "300", env)]
     /// Timeout (seconds) after an IPs last connection disconnects before
     /// killing the associated container
     pub timeout: u16,
@@ -116,7 +118,7 @@ async fn main() -> Result<()> {
     ctrlc::set_handler({
         let evt_tx = evt_tx.clone();
         move || {
-            let _ = evt_tx.send(connections::ConnectionEvent::Stop);
+            error_on_error!(evt_tx.send(connections::ConnectionEvent::Stop));
         }
     })
     .unwrap();
@@ -137,7 +139,7 @@ async fn main() -> Result<()> {
             Err(e) => {
                 error!("Failed spawning a listener, aborting");
                 error!("Reason: {}", e);
-                let _ = evt_tx.send(connections::ConnectionEvent::Stop);
+                error_on_error!(evt_tx.send(connections::ConnectionEvent::Stop));
                 break;
             }
         }
@@ -146,7 +148,7 @@ async fn main() -> Result<()> {
     context.handle_events().await;
 
     for handle in listener_handles {
-        let _ = handle.await;
+        error_on_error!(handle.await);
     }
 
     info!("Bye");

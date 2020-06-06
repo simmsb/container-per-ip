@@ -1,6 +1,6 @@
 [package]
 name = "container-per-ip"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Ben Simms <ben@bensimms.moe>"]
 edition = "2018"
 
@@ -11,14 +11,14 @@ name = "container-per-ip"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "0.2.11", features = ["full"] }
-structopt = "0.3.8"
-snafu = "0.6.2"
+tokio = { version = "0.2.21", features = ["full"] }
+structopt = "0.3.14"
+snafu = "0.6.8"
 log = "0.4.8"
-futures = "0.3.1"
+futures = "0.3.5"
 lazy_static = "1.4.0"
-multi-map = "1.2.0"
-flexi_logger = "0.14.5"
-ctrlc = "3.1.3"
-pin-utils = "0.1.0-alpha.4"
-bollard = "0.4.0"
+multi-map = "1.3.0"
+flexi_logger = "0.15.3"
+ctrlc = "3.1.4"
+pin-utils = "0.1.0"
+bollard = "0.5.1"

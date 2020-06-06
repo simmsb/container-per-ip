@@ -27,6 +27,10 @@ pub enum Error {
         port: u16,
         source: tokio::io::Error,
     },
+    #[snafu(display("Container wasn't running when it should be"))]
+    NotRunning,
+    #[snafu(display("Failed to get a container's ip address"))]
+    ContainerIP,
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -55,6 +59,20 @@ impl DeployedContainer {
                 port,
             })
     }
+}
+
+fn get_container_ip(c: &bollard::container::Container) -> Result<IpAddr> {
+    if let Ok(ip) = c.network_settings.ip_address.parse() {
+        return Ok(ip);
+    };
+
+    for net in c.network_settings.networks.values() {
+        if let Ok(ip) = dbg!(net).ip_address.parse() {
+            return Ok(ip);
+        }
+    }
+
+    return Err(Error::ContainerIP);
 }
 
 pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedContainer> {
@@ -93,9 +111,13 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
         .await
         .context(DeployContainer)?;
 
+    if !container.state.running {
+        return Err(Error::NotRunning);
+    }
+
     Ok(DeployedContainer {
         id: ContainerID(id),
-        ip_address: container.network_settings.ip_address.parse().unwrap(),
+        ip_address: get_container_ip(&container)?,
     })
 }
 
@@ -104,10 +126,24 @@ pub async fn new_container() -> Result<DeployedContainer> {
     deploy_container(&DOCKER, &OPTS).await
 }
 
-pub async fn kill_container(id: &ContainerID) {
-    use bollard::container::KillContainerOptions;
+pub async fn remove_container(id: &ContainerID) {
+    use bollard::container::{StopContainerOptions, RemoveContainerOptions};
 
-    let _ = DOCKER
-        .kill_container(id.as_str(), None::<KillContainerOptions<String>>)
-        .await;
+    error_on_error!(
+        DOCKER
+            .stop_container(id.as_str(), Some(StopContainerOptions { t: 5 }))
+            .await
+    );
+
+    error_on_error!(
+        DOCKER
+            .remove_container(
+                id.as_str(),
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                })
+            )
+            .await
+    );
 }
