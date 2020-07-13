@@ -1,12 +1,10 @@
 use bollard::{
-    container::{
-        Config, CreateContainerOptions, CreateContainerResults, HostConfig,
-        InspectContainerOptions, StartContainerOptions,
-    },
+    container::{Config, CreateContainerOptions, InspectContainerOptions, StartContainerOptions},
+    service::{ContainerCreateResponse, HostConfig},
     Docker,
 };
 use log::{info, warn};
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::net::IpAddr;
 use tokio::net::TcpStream;
 
@@ -29,6 +27,8 @@ pub enum Error {
     },
     #[snafu(display("Container wasn't running when it should be"))]
     NotRunning,
+    #[snafu(display("Failed to get the container's state"))]
+    NoState,
     #[snafu(display("Failed to get a container's ip address"))]
     ContainerIP,
 }
@@ -61,13 +61,14 @@ impl DeployedContainer {
     }
 }
 
-fn get_container_ip(c: &bollard::container::Container) -> Result<IpAddr> {
-    if let Ok(ip) = c.network_settings.ip_address.parse() {
-        return Ok(ip);
-    };
-
-    for net in c.network_settings.networks.values() {
-        if let Ok(ip) = dbg!(net).ip_address.parse() {
+fn get_container_ip(c: &bollard::models::ContainerInspectResponse) -> Result<IpAddr> {
+    for net in c
+        .network_settings
+        .as_ref()
+        .and_then(|s| Some(s.networks.as_ref()?.values()))
+        .context(ContainerIP)?
+    {
+        if let Some(ip) = net.ip_address.as_ref().and_then(|ip| ip.parse().ok()) {
             return Ok(ip);
         }
     }
@@ -82,21 +83,19 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
         image: Some(opts.image.as_str()),
         host_config: Some(HostConfig {
             privileged: if opts.privileged { Some(true) } else { None },
-            binds: Some(opts.binds.iter().map(|x| x.as_str()).collect()),
+            binds: Some(opts.binds.clone()),
             ..Default::default()
         }),
         ..Default::default()
     };
 
-    let CreateContainerResults { id, warnings } = docker
+    let ContainerCreateResponse { id, warnings } = docker
         .create_container(None::<CreateContainerOptions<String>>, config)
         .await
         .context(DeployContainer)?;
 
-    if let Some(warnings) = warnings {
-        for warning in warnings {
-            warn!("Creating container resulted in error: \"{}\"", warning);
-        }
+    for warning in warnings {
+        warn!("Creating container resulted in error: \"{}\"", warning);
     }
 
     info!("Starting container: {}", opts.image);
@@ -111,7 +110,13 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
         .await
         .context(DeployContainer)?;
 
-    if !container.state.running {
+    if !container
+        .state
+        .as_ref()
+        .context(NoState)?
+        .running
+        .unwrap_or(false)
+    {
         return Err(Error::NotRunning);
     }
 
@@ -127,7 +132,7 @@ pub async fn new_container() -> Result<DeployedContainer> {
 }
 
 pub async fn remove_container(id: &ContainerID) {
-    use bollard::container::{StopContainerOptions, RemoveContainerOptions};
+    use bollard::container::{RemoveContainerOptions, StopContainerOptions};
 
     error_on_error!(
         DOCKER
