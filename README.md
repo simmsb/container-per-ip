@@ -1,4 +1,8 @@
 # container-per-ip
+
+![Docker](https://github.com/nitros12/container-per-ip/workflows/Docker/badge.svg)
+![Rust](https://github.com/nitros12/container-per-ip/workflows/Rust/badge.svg)
+
 Some thing so you can spin up a container per client ip
 
 This works by spawning a new container based on the host address of a connecting
