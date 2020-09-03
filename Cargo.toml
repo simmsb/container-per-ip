@@ -1,3 +1,5 @@
+# syntax = denzp/cargo-wharf-frontend:latest
+
 [package]
 name = "container-per-ip"
 version = "0.1.2"
@@ -22,3 +24,17 @@ flexi_logger = "0.15.3"
 ctrlc = "3.1.4"
 pin-utils = "0.1.0"
 bollard = "0.7.1"
+
+[package.metadata.wharf.builder]
+image = "clux/muslrust:latest"
+target = "x86_64-unknown-linux-musl"
+
+[package.metadata.wharf.output]
+image = "docker:latest"
+workdir = "/"
+entrypoint = ["/bin/container-per-ip"]
+stop-signal = "SIGINT"
+
+[[package.metadata.wharf.binary]]
+name = "container-per-ip"
+destination = "/bin/container-per-ip"

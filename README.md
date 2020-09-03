@@ -39,3 +39,9 @@ ARGS:
 ```
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --net=host -it nitros12/container-per-ip --help
 ```
+
+## Building the docker image
+
+``` shell
+env DOCKER_BUILDKIT=1 docker build -f Cargo.toml -t nitros12/container-per-ip:latest .
+```
