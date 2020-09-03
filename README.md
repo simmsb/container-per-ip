@@ -1,6 +1,5 @@
 # container-per-ip
 
-![Docker](https://github.com/nitros12/container-per-ip/workflows/Docker/badge.svg)
 ![Rust](https://github.com/nitros12/container-per-ip/workflows/Rust/badge.svg)
 
 Some thing so you can spin up a container per client ip
