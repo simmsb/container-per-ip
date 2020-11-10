@@ -80,12 +80,13 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
     info!("Creating container: {}", opts.image);
 
     let config = Config {
-        image: Some(opts.image.as_str()),
+        image: Some(opts.image.clone()),
         host_config: Some(HostConfig {
             privileged: if opts.privileged { Some(true) } else { None },
             binds: Some(opts.binds.clone()),
             ..Default::default()
         }),
+        env: Some(opts.env.clone()),
         ..Default::default()
     };
 

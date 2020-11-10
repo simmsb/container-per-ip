@@ -88,6 +88,10 @@ pub struct Opt {
     /// Volume bindings to provide to containers
     pub binds: Vec<String>,
 
+    #[structopt(short, long)]
+    /// Environment variables to set on the child container
+    pub env: Vec<String>,
+
     #[structopt(short, long, default_value = "300")]
     /// Timeout (seconds) after an IPs last connection disconnects before
     /// killing the associated container
@@ -101,10 +105,6 @@ async fn main() -> Result<()> {
         .format_for_stderr(flexi_logger::colored_detailed_format)
         .start()
         .unwrap();
-
-    let version = DOCKER.version().await.context(DockerError)?;
-
-    debug!("Docker version: {:?}", version);
 
     let ports: HashSet<_> = OPTS.ports.iter().flatten().cloned().collect();
 
