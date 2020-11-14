@@ -73,7 +73,7 @@ fn get_container_ip(c: &bollard::models::ContainerInspectResponse) -> Result<IpA
         }
     }
 
-    return Err(Error::ContainerIP);
+    Err(Error::ContainerIP)
 }
 
 pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedContainer> {

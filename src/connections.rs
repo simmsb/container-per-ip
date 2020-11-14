@@ -1,8 +1,8 @@
+use std::collections::HashMap;
 use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::task::Poll;
-use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use snafu::{ResultExt, Snafu};
@@ -13,12 +13,12 @@ use log::{debug, error, info};
 
 use pin_utils::unsafe_pinned;
 
-use tokio::select;
 use tokio::io;
 use tokio::net::TcpStream;
+use tokio::select;
+use tokio::stream::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::DelayQueue;
-use tokio::stream::StreamExt;
 
 use crate::container_mgmt::{new_container, remove_container, ContainerID, DeployedContainer};
 use crate::single_consumer::SingleConsumer;
@@ -68,9 +68,7 @@ struct UnfuseFut<Fut> {
 
 impl<Fut> UnfuseFut<Fut> {
     fn new(future: Fut) -> Self {
-        UnfuseFut {
-            future
-        }
+        UnfuseFut { future }
     }
 
     unsafe_pinned!(future: Fut);
@@ -175,8 +173,29 @@ pub struct Context {
     disconnected_containers: MultiMap<IpAddr, ContainerID, SingleConsumer<DeployedContainer>>,
 }
 
+async fn create_connection_inner(port: u16, container: &DeployedContainer) -> Result<TcpStream> {
+    let max_tries = 10;
+    let mut tries = 0;
+
+    loop {
+        match container.connect(port).await.context(ContainerMgmt) {
+            Ok(s) => return Ok(s),
+            Err(e) if tries == max_tries => {
+                return Err(e);
+            }
+            _ => (),
+        }
+
+        tries += 1;
+
+        tokio::time::delay_for(Duration::from_millis(200)).await
+    }
+}
+
 impl Context {
-    pub fn new(listener_stop_txs: Vec<oneshot::Sender<()>>) -> (mpsc::UnboundedSender<ConnectionEvent>, Context) {
+    pub fn new(
+        listener_stop_txs: Vec<oneshot::Sender<()>>,
+    ) -> (mpsc::UnboundedSender<ConnectionEvent>, Context) {
         let (evt_tx, evt_rx) = mpsc::unbounded_channel();
         let (reap_tx, reap_rx) = mpsc::unbounded_channel();
         let (reaper_stop_tx, reaper_stop_rx) = oneshot::channel();
@@ -210,6 +229,7 @@ impl Context {
                             "Failed creating connection for container from {} on port {}: {}",
                             addr, port, e
                         );
+                        error_on_error!(self.event_chan.0.send(ConnectionEvent::ConnClosed(addr)));
                     }
                 }
                 ConnectionEvent::ConnClosed(addr) => {
@@ -217,7 +237,7 @@ impl Context {
                 }
                 ConnectionEvent::ContainerClosed(container_id) => {
                     self.disconnected_containers.remove_alt(&container_id);
-                },
+                }
                 ConnectionEvent::Stop => {
                     // oopsie
                     info!("Stopping, killing all connections and containers");
@@ -235,12 +255,16 @@ impl Context {
                     // remove all remaining containers in parallel
                     let mut handles = Vec::new();
                     for (_, (_, container)) in self.active_containers.drain() {
-                        handles.push(tokio::spawn(async move { remove_container(&container.id).await }));
+                        handles.push(tokio::spawn(async move {
+                            remove_container(&container.id).await
+                        }));
                     }
 
                     for (_, (_, container_c)) in self.disconnected_containers.iter() {
                         if let Some(container) = container_c.take() {
-                            handles.push(tokio::spawn(async move { remove_container(&container.id).await }));
+                            handles.push(tokio::spawn(async move {
+                                remove_container(&container.id).await
+                            }));
                         }
                     }
 
@@ -305,7 +329,7 @@ impl Context {
         client_stream: TcpStream,
         container: DeployedContainer,
     ) -> Result<()> {
-        let container_stream = container.connect(port).await.context(ContainerMgmt)?;
+        let container_stream = create_connection_inner(port, &container).await?;
 
         let (connection, close_send) = ActiveConnection::new(container.clone());
 
@@ -323,25 +347,27 @@ impl Context {
     }
 
     async fn close_connection(&mut self, client_addr: SocketAddr) {
-        let active_connection = self
-            .active_connections
-            .remove(&client_addr)
-            .expect("Connection closed but already removed from map?");
-
-        // we don't care if the receiver is closed or not.
-        let _ = active_connection.should_close.send(());
+        if let Some(active_connection) = self.active_connections.remove(&client_addr) {
+            // we don't care if the receiver is closed or not.
+            let _ = active_connection.should_close.send(());
+        }
 
         let active_container = self
             .active_containers
             .get_mut(&client_addr.ip())
             .expect("Container didn't exist but was being removed?");
 
+        debug!("Connection to container {:?} closed", active_container);
+
         active_container.0 -= 1;
 
         if active_container.0 == 0 {
             // no more entries, move the container to the reap queue
 
-            info!("Last connection to container {:?} gone, moving to reap queue", active_container.1.id);
+            info!(
+                "Last connection to container {:?} gone, moving to reap queue",
+                active_container.1.id
+            );
 
             let active_container = self.active_containers.remove(&client_addr.ip()).unwrap();
             let wrapped_container = SingleConsumer::new(active_container.1.clone());
