@@ -1,9 +1,9 @@
 use std::net::Ipv4Addr;
 
-use tokio::select;
-use tokio::task::JoinHandle;
 use tokio::net::TcpListener;
+use tokio::select;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use log::{error, info};
 
@@ -24,7 +24,7 @@ pub async fn listen_on(
     events: mpsc::UnboundedSender<ConnectionEvent>,
     mut stop: oneshot::Receiver<()>,
 ) -> Result<JoinHandle<()>> {
-    let mut listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
         .await
         .context(BindError { port })?;
 

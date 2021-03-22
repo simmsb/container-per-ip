@@ -16,9 +16,9 @@ use pin_utils::unsafe_pinned;
 use tokio::io;
 use tokio::net::TcpStream;
 use tokio::select;
-use tokio::stream::StreamExt;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::DelayQueue;
+use tokio_util::time::DelayQueue;
+use futures::StreamExt;
 
 use crate::container_mgmt::{new_container, remove_container, ContainerID, DeployedContainer};
 use crate::single_consumer::SingleConsumer;
@@ -188,7 +188,7 @@ async fn create_connection_inner(port: u16, container: &DeployedContainer) -> Re
 
         tries += 1;
 
-        tokio::time::delay_for(Duration::from_millis(200)).await
+        tokio::time::sleep(Duration::from_millis(200)).await
     }
 }
 
@@ -352,10 +352,12 @@ impl Context {
             let _ = active_connection.should_close.send(());
         }
 
-        let active_container = self
+        let active_container = match self
             .active_containers
-            .get_mut(&client_addr.ip())
-            .expect("Container didn't exist but was being removed?");
+            .get_mut(&client_addr.ip()) {
+                Some(c) => c,
+                None => return,
+            };
 
         debug!("Connection to container {:?} closed", active_container);
 
@@ -375,6 +377,7 @@ impl Context {
             self.containers_to_reap
                 .send(wrapped_container.clone())
                 .unwrap();
+
             self.disconnected_containers.insert(
                 client_addr.ip(),
                 active_container.1.id,

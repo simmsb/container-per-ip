@@ -19,22 +19,26 @@ mod single_consumer;
 
 lazy_static! {
     static ref DOCKER: Docker = Docker::connect_with_local_defaults()
-        .context(DockerError)
+        .context(error::Docker)
         .unwrap();
     static ref OPTS: Opt = Opt::from_args();
 }
 
-#[derive(Debug, Snafu)]
-enum Error {
-    #[snafu(display("An error occured with docker: {}", source))]
-    DockerError { source: bollard::errors::Error },
-    #[snafu(display("An error occured creating a listener: {}", source))]
-    ListenerSpawnError { source: listener::Error },
-    #[snafu(display("An error occured joining tokio handles {}", source))]
-    TokioJoinError { source: tokio::task::JoinError },
+mod error {
+    use snafu::Snafu;
+    use crate::listener;
+
+    #[derive(Debug, Snafu)]
+    #[snafu(visibility = "pub(crate)")]
+    pub enum Error {
+        #[snafu(display("An error occured with docker: {}", source))]
+        Docker { source: bollard::errors::Error },
+        #[snafu(display("An error occured creating a listener: {}", source))]
+        ListenerSpawn { source: listener::Error },
+    }
 }
 
-type Result<T, E = Error> = std::result::Result<T, E>;
+type Result<T, E = error::Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Snafu)]
 enum ParsePortError {
@@ -136,7 +140,7 @@ async fn main() -> Result<()> {
     let mut listener_handles = Vec::with_capacity(listener_handles_fut.len());
 
     for fut in listener_handles_fut {
-        match fut.await.context(ListenerSpawnError) {
+        match fut.await.context(error::ListenerSpawn) {
             Ok(handle) => listener_handles.push(handle),
             Err(e) => {
                 error!("Failed spawning a listener, aborting");

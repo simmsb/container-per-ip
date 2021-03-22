@@ -11,7 +11,7 @@ Concurrent tcp connections route to the same container, containers are removed
 when a timeout has elapsed since the last connection closed.
 
 ```
-container-per-ip 0.1.2
+container-per-ip 0.1.3
 Ben Simms <ben@bensimms.moe>
 Run a container per client ip
 
@@ -25,22 +25,16 @@ FLAGS:
 
 OPTIONS:
     -b, --binds <binds>...     Volume bindings to provide to containers
+    -e, --env <env>...         Environment variables to set on the child container
     -p, --ports <ports>...     Ports to listen on (tcp only currently)
     -t, --timeout <timeout>    Timeout (seconds) after an IPs last connection disconnects before killing the associated
                                container [default: 300]
 
 ARGS:
-    <image>    The docker image to run for each ip
-```
+    <image>    The docker image to run for each ip```
 
 ## Running in docker
 
 ```
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --net=host -it nitros12/container-per-ip --help
-```
-
-## Building the docker image
-
-``` shell
-env DOCKER_BUILDKIT=1 docker build -f Cargo.toml -t nitros12/container-per-ip:latest .
 ```
