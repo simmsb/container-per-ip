@@ -31,7 +31,8 @@ OPTIONS:
                                container [default: 300]
 
 ARGS:
-    <image>    The docker image to run for each ip```
+    <image>    The docker image to run for each ip
+```
 
 ## Running in docker
 
