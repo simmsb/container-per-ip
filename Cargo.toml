@@ -9,7 +9,7 @@ name = "container-per-ip"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.4.0", features = ["full"] }
+tokio = { version = "1.7.0", features = ["full"] }
 tokio-util = { version = "0.6.5", features = ["time"] }
 structopt = "0.3.21"
 snafu = "0.6.10"
