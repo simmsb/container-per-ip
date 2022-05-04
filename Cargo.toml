@@ -12,7 +12,7 @@ path = "src/main.rs"
 tokio = { version = "1.4.0", features = ["full"] }
 tokio-util = { version = "0.6.5", features = ["time"] }
 structopt = "0.3.21"
-snafu = "0.6.10"
+snafu = "0.7.1"
 log = "0.4.14"
 futures = "0.3.13"
 lazy_static = "1.4.0"
