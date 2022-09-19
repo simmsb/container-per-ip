@@ -1,123 +1,175 @@
-#![recursion_limit = "256"]
-
-use bollard::{models::EndpointSettings, network::ConnectNetworkOptions, Docker};
-use lazy_static::lazy_static;
-use log::{debug, error, info};
-use snafu::{ResultExt, Snafu};
+use bollard::image::CreateImageOptions;
+use bollard::{network::ConnectNetworkOptions, Docker};
+use clap::Parser;
+use futures::StreamExt;
+use miette::IntoDiagnostic;
+use once_cell::sync::Lazy;
 use std::collections::HashSet;
-use structopt::StructOpt;
 use tokio::sync::oneshot;
+use tracing::{debug, error, info};
 
-// lol
-
-#[macro_use]
-mod utils;
 mod connections;
 mod container_mgmt;
 mod listener;
 mod single_consumer;
+mod utils;
 
-lazy_static! {
-    static ref DOCKER: Docker = Docker::connect_with_local_defaults()
-        .context(error::Docker)
-        .unwrap();
-    static ref OPTS: Opt = Opt::from_args();
+static DOCKER: Lazy<Docker> = Lazy::new(|| Docker::connect_with_local_defaults().unwrap());
+static OPTS: Lazy<Opt> = Lazy::new(Opt::parse);
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum Error {
+    #[error("An error occured with docker")]
+    Docker {
+        #[source]
+        source: bollard::errors::Error,
+    },
+    #[error("An error occured creating a listener")]
+    ListenerSpawn {
+        #[source]
+        #[diagnostic_source]
+        source: listener::Error,
+    },
+    #[error("An error occured doing fs stuff")]
+    IOError {
+        #[source]
+        source: std::io::Error,
+    },
 }
 
-mod error {
-    use crate::listener;
-    use snafu::Snafu;
-
-    #[derive(Debug, Snafu)]
-    #[snafu(visibility = "pub(crate)")]
-    pub enum Error {
-        #[snafu(display("An error occured with docker: {}", source))]
-        Docker { source: bollard::errors::Error },
-        #[snafu(display("An error occured creating a listener: {}", source))]
-        ListenerSpawn { source: listener::Error },
-        #[snafu(display("An error occured doing fs stuff: {}", source))]
-        IOError { source: std::io::Error },
-    }
-}
-
-type Result<T, E = error::Error> = std::result::Result<T, E>;
-
-#[derive(Debug, Snafu)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 enum ParsePortError {
-    #[snafu(display("Invalid port range: {} (parsed as: {})", range, parse))]
-    InvalidPortRange { range: String, parse: String },
-    #[snafu(display("Failed to parse lhs of port range: {}", source))]
-    LHSInvalid { source: std::num::ParseIntError },
-    #[snafu(display("Failed to parse rhs of port range: {}", source))]
-    RHSInvalid { source: std::num::ParseIntError },
+    #[error("Invalid port range: {} (parsed as: {})", range, parse)]
+    InvalidRange { range: String, parse: String },
+    #[error("Failed to parse number: {}", source)]
+    NoParse {
+        #[source]
+        source: std::num::ParseIntError,
+    },
 }
 
-fn parse_ports(src: &str) -> Result<Vec<u16>, ParsePortError> {
+fn parse_ports(src: &str) -> miette::Result<Vec<u16>> {
     if let Ok(x) = src.parse::<u16>() {
         return Ok(vec![x]);
     }
 
     let range: Vec<_> = src.split('-').collect();
-    let (l, r) = match range.as_slice() {
-        [l, r] => (l, r),
-        x => {
-            return InvalidPortRange {
-                range: src.to_string(),
-                parse: format!("{:?}", x),
-            }
-            .fail()
+    match range.as_slice() {
+        [x] => {
+            let x = x
+                .parse::<u16>()
+                .map_err(|err| ParsePortError::NoParse { source: err })?;
+            Ok(vec![x])
         }
-    };
+        [l, r] => {
+            let l = l
+                .parse::<u16>()
+                .map_err(|err| ParsePortError::NoParse { source: err })?;
+            let r = r
+                .parse::<u16>()
+                .map_err(|err| ParsePortError::NoParse { source: err })?;
 
-    let l = l.parse::<u16>().context(LHSInvalid)?;
-    let r = r.parse::<u16>().context(RHSInvalid)?;
-
-    Ok((l..r).collect())
+            Ok((l..r).collect())
+        }
+        x => Err(ParsePortError::InvalidRange {
+            range: src.to_string(),
+            parse: format!("{:?}", x),
+        }
+        .into()),
+    }
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(
-    name = "container-per-ip",
-    about = "Run a container per client ip",
-    author = "Ben Simms <ben@bensimms.moe>"
-)]
+#[derive(Debug, clap::Parser)]
+#[clap(about = "Run a container per client ip", author)]
 pub struct Opt {
-    #[structopt()]
     /// The docker image to run for each ip
     pub image: String,
 
-    #[structopt(long)]
+    #[clap(long)]
     /// Should the containers be started with the `--privileged` flag
     pub privileged: bool,
 
-    #[structopt(short, long, parse(try_from_str = parse_ports))]
+    #[clap(short, long, parse(try_from_str = parse_ports))]
     /// Ports to listen on (tcp only currently)
     pub ports: Vec<Vec<u16>>,
 
-    #[structopt(short, long)]
+    #[clap(short, long)]
     /// Volume bindings to provide to containers
     pub binds: Vec<String>,
 
-    #[structopt(long)]
+    #[clap(long)]
     pub network: Option<String>,
 
-    #[structopt(short, long)]
+    #[clap(short, long)]
     /// Environment variables to set on the child container
     pub env: Vec<String>,
 
-    #[structopt(short, long, default_value = "300")]
+    #[clap(short, long, default_value = "300")]
     /// Timeout (seconds) after an IPs last connection disconnects before
     /// killing the associated container
     pub timeout: u16,
 }
 
+fn install_tracing() -> miette::Result<()> {
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_span_events(FmtSpan::CLOSE)
+        .pretty();
+    let filter_layer = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("container_per_ip=info".parse().into_diagnostic()?);
+
+    tracing_subscriber::registry()
+        .with(tracing_error::ErrorLayer::default())
+        .with(filter_layer)
+        .with(fmt_layer)
+        .init();
+
+    Ok(())
+}
+
+async fn pull_if_needed() -> Result<(), Error> {
+    let image = OPTS.image.as_str();
+    let need_to_pull = match DOCKER.inspect_image(image).await {
+        Ok(_) => false,
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => true,
+        Err(e) => return Err(Error::Docker { source: e }),
+    };
+
+    if need_to_pull {
+        info!(image, "Pulling image");
+
+        let tag = image.rsplit_once(':').map(|(_, t)| t).unwrap_or("latest");
+
+        let mut s = DOCKER.create_image(
+            Some(CreateImageOptions {
+                from_image: image,
+                tag,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(msg) = s.next().await {
+            let progress = msg.map_err(|e| Error::Docker { source: e })?;
+            info!(?progress, "Pulling image");
+        }
+
+        info!("Finished pulling image");
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    flexi_logger::Logger::with_env_or_str("info, container_per_ip = debug")
-        .duplicate_to_stderr(flexi_logger::Duplicate::All)
-        .format_for_stderr(flexi_logger::colored_detailed_format)
-        .start()
-        .unwrap();
+async fn main() -> miette::Result<()> {
+    install_tracing()?;
+
+    pull_if_needed().await?;
 
     let ports: HashSet<_> = OPTS.ports.iter().flatten().cloned().collect();
 
@@ -131,7 +183,7 @@ async fn main() -> Result<()> {
     ctrlc::set_handler({
         let evt_tx = evt_tx.clone();
         move || {
-            error_on_error!(evt_tx.send(connections::ConnectionEvent::Stop));
+            trace_error!(evt_tx.send(connections::ConnectionEvent::Stop));
         }
     })
     .unwrap();
@@ -139,7 +191,8 @@ async fn main() -> Result<()> {
     if let Some(network) = OPTS.network.as_ref() {
         debug!("Adding ourselves to {}", network);
 
-        let hostname = std::fs::read_to_string("/etc/hostname").context(error::IOError)?;
+        let hostname =
+            std::fs::read_to_string("/etc/hostname").map_err(|e| Error::IOError { source: e })?;
 
         let config = ConnectNetworkOptions {
             container: hostname.trim(),
@@ -149,7 +202,7 @@ async fn main() -> Result<()> {
         DOCKER
             .connect_network(network, config)
             .await
-            .context(error::Docker)?;
+            .map_err(|e| Error::Docker { source: e })?;
     }
 
     debug!("Starting listeners");
@@ -163,13 +216,11 @@ async fn main() -> Result<()> {
     let mut listener_handles = Vec::with_capacity(listener_handles_fut.len());
 
     for fut in listener_handles_fut {
-        match fut.await.context(error::ListenerSpawn) {
+        match fut.await.map_err(|e| Error::ListenerSpawn { source: e }) {
             Ok(handle) => listener_handles.push(handle),
-            Err(e) => {
+            Err(err) => {
                 error!("Failed spawning a listener, aborting");
-                error!("Reason: {}", e);
-                error_on_error!(evt_tx.send(connections::ConnectionEvent::Stop));
-                break;
+                return Err(err.into());
             }
         }
     }
@@ -177,7 +228,7 @@ async fn main() -> Result<()> {
     context.handle_events().await;
 
     for handle in listener_handles {
-        error_on_error!(handle.await);
+        trace_error!(handle.await);
     }
 
     info!("Bye");

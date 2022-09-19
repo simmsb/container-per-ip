@@ -3,34 +3,33 @@ use bollard::{
     service::{ContainerCreateResponse, HostConfig},
     Docker,
 };
-use log::{info, warn};
-use snafu::{OptionExt, ResultExt, Snafu};
 use std::net::IpAddr;
 use tokio::net::TcpStream;
+use tracing::{info, warn};
 
 use crate::{Opt, DOCKER, OPTS};
 
-#[derive(Debug, Snafu)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
-    #[snafu(display("Failed to deploy container: {}", source))]
-    DeployContainer { source: bollard::errors::Error },
-    #[snafu(display(
-        "Failed to connect to container on port ({:?}:{}): {}",
-        ip,
-        port,
-        source
-    ))]
+    #[error("Failed to deploy container")]
+    DeployContainer {
+        #[source]
+        source: bollard::errors::Error,
+    },
+    #[error("Failed to connect to container on port ({:?}:{})", ip, port)]
     ConnectContainer {
         ip: IpAddr,
         port: u16,
+
+        #[source]
         source: tokio::io::Error,
     },
-    #[snafu(display("Container wasn't running when it should be"))]
-    NotRunning,
-    #[snafu(display("Failed to get the container's state"))]
-    NoState,
-    #[snafu(display("Failed to get a container's ip address"))]
-    ContainerIP,
+    #[error("Container {:?} wasn't running when it should be", id)]
+    NotRunning { id: ContainerID },
+    #[error("Failed to get the state of container {:?}", id)]
+    NoState { id: ContainerID },
+    #[error("Failed to get the ip address of container {:?}", id)]
+    ContainerIP { id: ContainerID },
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -54,26 +53,48 @@ impl DeployedContainer {
     pub async fn connect(&self, port: u16) -> Result<TcpStream> {
         TcpStream::connect((self.ip_address, port))
             .await
-            .context(ConnectContainer {
+            .map_err(|e| Error::ConnectContainer {
                 ip: self.ip_address,
                 port,
+                source: e,
             })
+    }
+
+    pub async fn check_up(&self) -> bool {
+        let inspection = match DOCKER.inspect_container(self.id.as_str(), None).await {
+            Ok(x) => x,
+            Err(err) => {
+                tracing::error!(
+                    ?err,
+                    "Failed to get container info (maybe it was deleted under our feet)"
+                );
+                return false;
+            }
+        };
+
+        inspection
+            .state
+            .map(|s| s.running.unwrap_or(false))
+            .unwrap_or(false)
     }
 }
 
-fn get_container_ip(c: &bollard::models::ContainerInspectResponse) -> Result<IpAddr> {
+fn get_container_ip(
+    id: &ContainerID,
+    c: &bollard::models::ContainerInspectResponse,
+) -> Result<IpAddr> {
     for net in c
         .network_settings
         .as_ref()
         .and_then(|s| Some(s.networks.as_ref()?.values()))
-        .context(ContainerIP)?
+        .ok_or_else(|| Error::ContainerIP { id: id.to_owned() })?
     {
         if let Some(ip) = net.ip_address.as_ref().and_then(|ip| ip.parse().ok()) {
             return Ok(ip);
         }
     }
 
-    Err(Error::ContainerIP)
+    Err(Error::ContainerIP { id: id.to_owned() })
 }
 
 pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedContainer> {
@@ -94,7 +115,7 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
     let ContainerCreateResponse { id, warnings } = docker
         .create_container(None::<CreateContainerOptions<String>>, config)
         .await
-        .context(DeployContainer)?;
+        .map_err(|e| Error::DeployContainer { source: e })?;
 
     for warning in warnings {
         warn!("Creating container resulted in error: \"{}\"", warning);
@@ -105,27 +126,30 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
     docker
         .start_container(&id, None::<StartContainerOptions<String>>)
         .await
-        .context(DeployContainer)?;
+        .map_err(|e| Error::DeployContainer { source: e })?;
 
     let container = docker
         .inspect_container(&id, None::<InspectContainerOptions>)
         .await
-        .context(DeployContainer)?;
+        .map_err(|e| Error::DeployContainer { source: e })?;
 
     if !container
         .state
         .as_ref()
-        .context(NoState)?
+        .ok_or_else(|| Error::NoState {
+            id: ContainerID(id.to_owned()),
+        })?
         .running
         .unwrap_or(false)
     {
-        return Err(Error::NotRunning);
+        return Err(Error::NotRunning {
+            id: ContainerID(id.to_owned()),
+        });
     }
 
-    Ok(DeployedContainer {
-        id: ContainerID(id),
-        ip_address: get_container_ip(&container)?,
-    })
+    let id = ContainerID(id);
+    let ip_address = get_container_ip(&id, &container)?;
+    Ok(DeployedContainer { id, ip_address })
 }
 
 /// `deploy_container` but uses global values for docker and opts
@@ -136,13 +160,13 @@ pub async fn new_container() -> Result<DeployedContainer> {
 pub async fn remove_container(id: &ContainerID) {
     use bollard::container::{RemoveContainerOptions, StopContainerOptions};
 
-    error_on_error!(
+    crate::trace_error!(
         DOCKER
             .stop_container(id.as_str(), Some(StopContainerOptions { t: 5 }))
             .await
     );
 
-    error_on_error!(
+    crate::trace_error!(
         DOCKER
             .remove_container(
                 id.as_str(),

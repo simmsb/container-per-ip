@@ -1,0 +1,37 @@
+name: "Build"
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - v*
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2.4.0
+
+    - uses: cachix/install-nix-action@v17
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+
+    - run: |
+        mkdir -p $HOME/.config/nix/
+        echo "substituters = https://cache.nixos.org" >> $HOME/.config/nix/nix.conf
+        echo "trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" >> $HOME/.config/nix/nix.conf
+
+    - uses: cachix/cachix-action@v10
+      with:
+        name: simmsb-container-per-ip
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+    - run: nix run .#oci-image.copyToPodman
+
+    - name: Push To Registry
+      uses: redhat-actions/push-to-registry@v2.6
+      with:
+        registry: ghcr.io
+        image: "ghcr.io/simmsb/container-per-ip"
+        tags: ${{ steps.meta.outputs.tags }} latest 
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
