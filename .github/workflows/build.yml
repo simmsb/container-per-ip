@@ -3,8 +3,6 @@ on:
   push:
 jobs:
   build:
-    permissions:
-      packages: write
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2.4.0
@@ -30,7 +28,7 @@ jobs:
       uses: redhat-actions/push-to-registry@v2.6
       with:
         registry: ghcr.io
-        image: "ghcr.io/simmsb/container-per-ip"
+        image: "simmsb/container-per-ip"
         tags: ${{ steps.meta.outputs.tags }} latest 
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

@@ -62,7 +62,7 @@
         packages.default = my-crate;
 
         packages.oci-image = nix2container.packages.${system}.nix2container.buildImage {
-          name = "ghcr.io/simmsb/container-per-ip";
+          name = "simmsb/container-per-ip";
           tag = "latest";
           config = {
             entrypoint = [ "${my-crate}/bin/container-per-ip" ];
