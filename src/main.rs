@@ -1,10 +1,10 @@
 #![recursion_limit = "256"]
 
-use std::collections::HashSet;
-use bollard::Docker;
+use bollard::{models::EndpointSettings, network::ConnectNetworkOptions, Docker};
 use lazy_static::lazy_static;
-use log::{debug, info, error};
+use log::{debug, error, info};
 use snafu::{ResultExt, Snafu};
+use std::collections::HashSet;
 use structopt::StructOpt;
 use tokio::sync::oneshot;
 
@@ -25,8 +25,8 @@ lazy_static! {
 }
 
 mod error {
-    use snafu::Snafu;
     use crate::listener;
+    use snafu::Snafu;
 
     #[derive(Debug, Snafu)]
     #[snafu(visibility = "pub(crate)")]
@@ -35,6 +35,8 @@ mod error {
         Docker { source: bollard::errors::Error },
         #[snafu(display("An error occured creating a listener: {}", source))]
         ListenerSpawn { source: listener::Error },
+        #[snafu(display("An error occured doing fs stuff: {}", source))]
+        IOError { source: std::io::Error },
     }
 }
 
@@ -74,7 +76,11 @@ fn parse_ports(src: &str) -> Result<Vec<u16>, ParsePortError> {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "container-per-ip", about = "Run a container per client ip", author = "Ben Simms <ben@bensimms.moe>")]
+#[structopt(
+    name = "container-per-ip",
+    about = "Run a container per client ip",
+    author = "Ben Simms <ben@bensimms.moe>"
+)]
 pub struct Opt {
     #[structopt()]
     /// The docker image to run for each ip
@@ -91,6 +97,9 @@ pub struct Opt {
     #[structopt(short, long)]
     /// Volume bindings to provide to containers
     pub binds: Vec<String>,
+
+    #[structopt(long)]
+    pub network: Option<String>,
 
     #[structopt(short, long)]
     /// Environment variables to set on the child container
@@ -112,10 +121,8 @@ async fn main() -> Result<()> {
 
     let ports: HashSet<_> = OPTS.ports.iter().flatten().cloned().collect();
 
-    let (listener_stop_tx, listener_stop_rx): (Vec<_>, Vec<_>) = ports
-        .iter()
-        .map(|_| oneshot::channel())
-        .unzip();
+    let (listener_stop_tx, listener_stop_rx): (Vec<_>, Vec<_>) =
+        ports.iter().map(|_| oneshot::channel()).unzip();
 
     let (evt_tx, context) = connections::Context::new(listener_stop_tx);
 
@@ -128,6 +135,22 @@ async fn main() -> Result<()> {
         }
     })
     .unwrap();
+
+    if let Some(network) = OPTS.network.as_ref() {
+        debug!("Adding ourselves to {}", network);
+
+        let hostname = std::fs::read_to_string("/etc/hostname").context(error::IOError)?;
+
+        let config = ConnectNetworkOptions {
+            container: hostname.trim(),
+            endpoint_config: Default::default(),
+        };
+
+        DOCKER
+            .connect_network(network, config)
+            .await
+            .context(error::Docker)?;
+    }
 
     debug!("Starting listeners");
 
@@ -149,7 +172,7 @@ async fn main() -> Result<()> {
                 break;
             }
         }
-    };
+    }
 
     context.handle_events().await;
 

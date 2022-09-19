@@ -84,6 +84,7 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
         host_config: Some(HostConfig {
             privileged: if opts.privileged { Some(true) } else { None },
             binds: Some(opts.binds.clone()),
+            network_mode: opts.network.clone(),
             ..Default::default()
         }),
         env: Some(opts.env.clone()),
