@@ -1,4 +1,4 @@
-name: "Build"
+name: CI
 on:
   pull_request:
   push:
@@ -23,3 +23,13 @@ jobs:
 
     - run: nix build
     - run: nix flake check
+    - run: nix run .#oci-image.copyToPodman
+
+    - name: Push To Registry
+      uses: redhat-actions/push-to-registry@v2.6
+      with:
+        registry: ghcr.io
+        image: "ghcr.io/simmsb/container-per-ip"
+        tags: ${{ steps.meta.outputs.tags }} latest 
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
