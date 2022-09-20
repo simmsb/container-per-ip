@@ -23,6 +23,7 @@ jobs:
     - run: nix build
     - run: nix flake check
     - run: nix run .#oci-image.copyToPodman
+    - run: podman tag simmsb/container-per-ip simmsb/container-per-ip:${{ github.ref_name }}
 
     - name: Push To Registry
       uses: redhat-actions/push-to-registry@v2.6
