@@ -160,6 +160,8 @@ async fn pull_if_needed() -> Result<(), Error> {
         }
 
         info!("Finished pulling image");
+    } else {
+        info!("Image {} already loaded", image);
     }
 
     Ok(())
@@ -188,21 +190,23 @@ async fn main() -> miette::Result<()> {
     })
     .unwrap();
 
-    if let Some(network) = OPTS.network.as_ref() {
-        debug!("Adding ourselves to {}", network);
+    if in_container::in_container() {
+        if let Some(network) = OPTS.network.as_ref() {
+            debug!("Adding ourselves to {}", network);
 
-        let hostname =
-            std::fs::read_to_string("/etc/hostname").map_err(|e| Error::IOError { source: e })?;
+            let hostname = std::fs::read_to_string("/etc/hostname")
+                .map_err(|e| Error::IOError { source: e })?;
 
-        let config = ConnectNetworkOptions {
-            container: hostname.trim(),
-            endpoint_config: Default::default(),
-        };
+            let config = ConnectNetworkOptions {
+                container: hostname.trim(),
+                endpoint_config: Default::default(),
+            };
 
-        DOCKER
-            .connect_network(network, config)
-            .await
-            .map_err(|e| Error::Docker { source: e })?;
+            DOCKER
+                .connect_network(network, config)
+                .await
+                .map_err(|e| Error::Docker { source: e })?;
+        }
     }
 
     debug!("Starting listeners");
