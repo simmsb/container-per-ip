@@ -29,6 +29,6 @@ jobs:
       with:
         registry: ghcr.io
         image: "simmsb/container-per-ip"
-        tags: ${{ steps.meta.outputs.tags }} latest 
+        tags: ${{ github.ref_name }} latest 
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
