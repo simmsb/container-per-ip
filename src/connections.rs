@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use tracing::Instrument;
 use double_map::DHashMap;
 use tokio::io;
 use tokio::net::TcpStream;
@@ -86,6 +87,8 @@ async fn rx_tx_loop(
     close: oneshot::Receiver<()>,
     events: mpsc::UnboundedSender<ConnectionEvent>,
 ) {
+    info!("Starting tx-rx loop");
+
     let (mut lhs_r, mut lhs_w) = lhs.split();
     let (mut rhs_r, mut rhs_w) = rhs.split();
 
@@ -184,7 +187,7 @@ impl Context {
                 ConnectionEvent::ConnCreate(addr, port, socket) => {
                     if let Err(e) = self.create_connection_for(addr, port, socket).await {
                         error!(
-                            "Failed creating connection for container from {} on port {}: {}",
+                            "Failed creating connection for container from {} on port {}: {:?}",
                             addr, port, e
                         );
                         crate::trace_error!(self
@@ -296,6 +299,7 @@ impl Context {
         client_stream: TcpStream,
         container: DeployedContainer,
     ) -> miette::Result<()> {
+        info!(%client_addr, port, "Creating container connection");
         let container_stream = create_connection_inner(port, &container).await?;
 
         let (connection, close_send) = ActiveConnection::new(container.clone());
@@ -308,7 +312,7 @@ impl Context {
             container_stream,
             close_send,
             self.event_chan.0.clone(),
-        ));
+        ).instrument(tracing::Span::current()));
 
         Ok(())
     }

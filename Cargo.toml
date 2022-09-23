@@ -1,6 +1,6 @@
 [package]
 name = "container-per-ip"
-version = "0.2.0"
+version = "0.2.2"
 authors = ["Ben Simms <ben@bensimms.moe>"]
 edition = "2018"
 
@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1.21.1", features = ["full"] }
 futures = "0.3.24"
-ctrlc = "3.2.3"
+ctrlc = { version = "3.2.3", features = ["termination"] }
 bollard = "0.13.0"
 miette = { version = "5.3.0", features = ["fancy"] }
 thiserror = "1.0.35"
@@ -26,3 +26,4 @@ futures-delay-queue = { version = "0.5.2", default-features = false, features = 
 ] }
 double-map = "0.14.0"
 in-container = { version = "1.1.0", default-features = false }
+uuid = { version = "1.1.2", features = ["v4"] }

@@ -97,7 +97,8 @@ pub struct Opt {
     /// Volume bindings to provide to containers
     pub binds: Vec<String>,
 
-    #[clap(long)]
+    #[clap(short, long)]
+    /// Set the docker network containers should be started in
     pub network: Option<String>,
 
     #[clap(short, long)]
@@ -108,6 +109,14 @@ pub struct Opt {
     /// Timeout (seconds) after an IPs last connection disconnects before
     /// killing the associated container
     pub timeout: u16,
+
+    /// Specifies the unique id set in the container-per-ip.parent tag of
+    /// spawned containers.
+    ///
+    /// By default, containers will be tagged with `container-per-ip.parent = <uuid>`
+    /// If specified, containers will be tagged with `container-per-ip.parent = <container_tag_suffix>`
+    #[clap(long)]
+    pub parent_id: Option<String>
 }
 
 fn install_tracing() -> miette::Result<()> {
@@ -234,6 +243,8 @@ async fn main() -> miette::Result<()> {
     for handle in listener_handles {
         trace_error!(handle.await);
     }
+
+    container_mgmt::cleanup_containers().await?;
 
     info!("Bye");
 

@@ -1,18 +1,30 @@
 use bollard::{
-    container::{Config, CreateContainerOptions, InspectContainerOptions, StartContainerOptions},
+    container::{
+        Config, CreateContainerOptions, InspectContainerOptions, KillContainerOptions,
+        ListContainersOptions, StartContainerOptions,
+    },
     service::{ContainerCreateResponse, HostConfig},
     Docker,
 };
+use once_cell::sync::Lazy;
 use std::net::IpAddr;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
 use crate::{Opt, DOCKER, OPTS};
 
+static PARENT_ID: Lazy<String> = Lazy::new(|| {
+    if let Some(suffix) = OPTS.parent_id.as_ref() {
+        suffix.clone()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    }
+});
+
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
-    #[error("Failed to deploy container")]
-    DeployContainer {
+    #[error("An error occured with docker")]
+    Docker {
         #[source]
         source: bollard::errors::Error,
     },
@@ -109,13 +121,19 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
             ..Default::default()
         }),
         env: Some(opts.env.clone()),
+        labels: Some(
+            [("container_per_ip.parent".to_owned(), PARENT_ID.clone())]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
         ..Default::default()
     };
 
     let ContainerCreateResponse { id, warnings } = docker
         .create_container(None::<CreateContainerOptions<String>>, config)
         .await
-        .map_err(|e| Error::DeployContainer { source: e })?;
+        .map_err(|e| Error::Docker { source: e })?;
 
     for warning in warnings {
         warn!("Creating container resulted in error: \"{}\"", warning);
@@ -126,12 +144,12 @@ pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedCon
     docker
         .start_container(&id, None::<StartContainerOptions<String>>)
         .await
-        .map_err(|e| Error::DeployContainer { source: e })?;
+        .map_err(|e| Error::Docker { source: e })?;
 
     let container = docker
         .inspect_container(&id, None::<InspectContainerOptions>)
         .await
-        .map_err(|e| Error::DeployContainer { source: e })?;
+        .map_err(|e| Error::Docker { source: e })?;
 
     if !container
         .state
@@ -177,4 +195,46 @@ pub async fn remove_container(id: &ContainerID) {
             )
             .await
     );
+}
+
+/// perform final cleanup of containers when the process is due to exit
+///
+/// Ideally we should get all of them with the on-shutdown stuff,
+/// this just makes really sure
+pub async fn cleanup_containers() -> Result<()> {
+    let filters = [(
+        "label".to_owned(),
+        vec![format!("container-per-ip.parent={}", PARENT_ID.as_str())],
+    )]
+    .iter()
+    .cloned()
+    .collect();
+
+    let containers = DOCKER
+        .list_containers(Some(ListContainersOptions {
+            filters,
+            ..Default::default()
+        }))
+        .await
+        .map_err(|e| Error::Docker { source: e })?;
+
+    for container in containers {
+        let id = match &container.id {
+            Some(id) => id,
+            None => {
+                warn!(?container, "Container didn't have an id???");
+                continue;
+            }
+        };
+
+        info!(id, "Forcibly killing container");
+
+        crate::trace_error!(
+            DOCKER
+                .kill_container(id.as_str(), Option::<KillContainerOptions<String>>::None)
+                .await
+        );
+    }
+
+    Ok(())
 }
