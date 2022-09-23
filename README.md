@@ -19,17 +19,43 @@ USAGE:
     container-per-ip [OPTIONS] <IMAGE>
 
 ARGS:
-    <IMAGE>    The docker image to run for each ip
+    <IMAGE>
+            The docker image to run for each ip
 
 OPTIONS:
-    -b, --binds <BINDS>        Volume bindings to provide to containers
-    -e, --env <ENV>            Environment variables to set on the child container
-    -h, --help                 Print help information
-        --network <NETWORK>    
-    -p, --ports <PORTS>        Ports to listen on (tcp only currently)
-        --privileged           Should the containers be started with the `--privileged` flag
-    -t, --timeout <TIMEOUT>    Timeout (seconds) after an IPs last connection disconnects before
-                               killing the associated container [default: 300]
+    -b, --binds <BINDS>
+            Volume bindings to provide to containers
+
+    -e, --env <ENV>
+            Environment variables to set on the child container
+
+        --force-pull
+            Always pull the image on start
+
+    -h, --help
+            Print help information
+
+    -n, --network <NETWORK>
+            Set the docker network containers should be started in
+
+    -p, --ports <PORTS>
+            Ports to listen on (tcp only currently)
+
+        --parent-id <PARENT_ID>
+            Specifies the unique id set in the container-per-ip.parent tag of spawned containers.
+            
+            By default, containers will be tagged with `container-per-ip.parent = <uuid>`
+            If specified, containers will be tagged with `container-per-ip.parent =
+            <container_tag_suffix>`
+
+        --privileged
+            Should the containers be started with the `--privileged` flag
+
+    -t, --timeout <TIMEOUT>
+            Timeout (seconds) after an IPs last connection disconnects before killing the associated
+            container
+            
+            [default: 300]
 ```
 
 ## Running in docker

@@ -15,7 +15,7 @@ mod single_consumer;
 mod utils;
 
 static DOCKER: Lazy<Docker> = Lazy::new(|| Docker::connect_with_local_defaults().unwrap());
-static OPTS: Lazy<Opt> = Lazy::new(Opt::parse);
+static OPTS: Lazy<Opts> = Lazy::new(Opts::parse);
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
@@ -81,7 +81,7 @@ fn parse_ports(src: &str) -> miette::Result<Vec<u16>> {
 
 #[derive(Debug, clap::Parser)]
 #[clap(about = "Run a container per client ip", author)]
-pub struct Opt {
+pub struct Opts {
     /// The docker image to run for each ip
     pub image: String,
 
@@ -116,7 +116,11 @@ pub struct Opt {
     /// By default, containers will be tagged with `container-per-ip.parent = <uuid>`
     /// If specified, containers will be tagged with `container-per-ip.parent = <container_tag_suffix>`
     #[clap(long)]
-    pub parent_id: Option<String>
+    pub parent_id: Option<String>,
+
+    /// Always pull the image on start
+    #[clap(long)]
+    pub force_pull: bool,
 }
 
 fn install_tracing() -> miette::Result<()> {
@@ -139,14 +143,19 @@ fn install_tracing() -> miette::Result<()> {
     Ok(())
 }
 
-async fn pull_if_needed() -> Result<(), Error> {
+async fn pull_if_needed(force: bool) -> Result<(), Error> {
     let image = OPTS.image.as_str();
-    let need_to_pull = match DOCKER.inspect_image(image).await {
-        Ok(_) => false,
-        Err(bollard::errors::Error::DockerResponseServerError {
-            status_code: 404, ..
-        }) => true,
-        Err(e) => return Err(Error::Docker { source: e }),
+
+    let need_to_pull = if force {
+        true
+    } else {
+        match DOCKER.inspect_image(image).await {
+            Ok(_) => false,
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => true,
+            Err(e) => return Err(Error::Docker { source: e }),
+        }
     };
 
     if need_to_pull {
@@ -180,7 +189,7 @@ async fn pull_if_needed() -> Result<(), Error> {
 async fn main() -> miette::Result<()> {
     install_tracing()?;
 
-    pull_if_needed().await?;
+    pull_if_needed(OPTS.force_pull).await?;
 
     let ports: HashSet<_> = OPTS.ports.iter().flatten().cloned().collect();
 

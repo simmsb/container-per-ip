@@ -11,7 +11,7 @@ use std::net::IpAddr;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
-use crate::{Opt, DOCKER, OPTS};
+use crate::{Opts, DOCKER, OPTS};
 
 static PARENT_ID: Lazy<String> = Lazy::new(|| {
     if let Some(suffix) = OPTS.parent_id.as_ref() {
@@ -109,7 +109,7 @@ fn get_container_ip(
     Err(Error::ContainerIP { id: id.to_owned() })
 }
 
-pub async fn deploy_container(docker: &Docker, opts: &Opt) -> Result<DeployedContainer> {
+pub async fn deploy_container(docker: &Docker, opts: &Opts) -> Result<DeployedContainer> {
     info!("Creating container: {}", opts.image);
 
     let config = Config {
