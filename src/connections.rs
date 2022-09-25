@@ -2,21 +2,24 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use tracing::Instrument;
 use double_map::DHashMap;
-use tokio::io;
+use tokio::io::{self, AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 use tracing::{debug, error, info};
+use udpflow::{UdpStreamLocal, UdpStreamRemote};
 
 use crate::container_mgmt::{new_container, remove_container, ContainerID, DeployedContainer};
+use crate::listener::UdpStream;
 use crate::single_consumer::SingleConsumer;
 use crate::OPTS;
 
 #[derive(Debug)]
 pub enum ConnectionEvent {
-    ConnCreate(SocketAddr, u16, TcpStream),
+    TcpConnCreate(SocketAddr, u16, TcpStream),
+    UdpConnCreate(SocketAddr, u16, UdpStream),
     ConnClosed(SocketAddr),
     ContainerClosed(ContainerID),
     Stop,
@@ -80,28 +83,24 @@ async fn container_reaper(
     }
 }
 
-async fn rx_tx_loop(
+async fn rx_tx_loop<LS, RS>(
     addr: SocketAddr,
-    mut lhs: TcpStream,
-    mut rhs: TcpStream,
+    mut lhs: LS,
+    mut rhs: RS,
     close: oneshot::Receiver<()>,
     events: mpsc::UnboundedSender<ConnectionEvent>,
-) {
+) where
+    LS: AsyncRead + AsyncWrite + Unpin,
+    RS: AsyncRead + AsyncWrite + Unpin,
+{
     info!("Starting tx-rx loop");
-
-    let (mut lhs_r, mut lhs_w) = lhs.split();
-    let (mut rhs_r, mut rhs_w) = rhs.split();
 
     select! {
         _ = close => {
-            debug!("Stopping transmission ({:?} <--> {:?}) commanded to stop.", lhs, rhs);
+            debug!("Stopping transmission for {}, commanded to stop.", addr);
         },
-        _ = io::copy(&mut lhs_r, &mut rhs_w) => {
-            debug!("Stopping transmission ({:?} <--> {:?}) rhs_w or lhs_r closed.", lhs, rhs);
-            crate::trace_error!(events.send(ConnectionEvent::ConnClosed(addr)));
-        },
-        _ = io::copy(&mut rhs_r, &mut lhs_w) => {
-            debug!("Stopping transmission ({:?} <--> {:?}) lhs_w or rhs_r closed.", lhs, rhs);
+        _ = io::copy_bidirectional(&mut lhs, &mut rhs) => {
+            debug!("Stopping transmission for {}", addr);
             crate::trace_error!(events.send(ConnectionEvent::ConnClosed(addr)));
         },
     }
@@ -129,28 +128,6 @@ pub struct Context {
     // disconnected containers, contains the same receivers of disconnected containers
     // as `containers_to_reap` and is used to bring disconnected containers back alive
     disconnected_containers: DHashMap<IpAddr, ContainerID, SingleConsumer<DeployedContainer>>,
-}
-
-async fn create_connection_inner(
-    port: u16,
-    container: &DeployedContainer,
-) -> miette::Result<TcpStream> {
-    let max_tries = 10;
-    let mut tries = 0;
-
-    loop {
-        match container.connect(port).await {
-            Ok(s) => return Ok(s),
-            Err(e) if tries == max_tries => {
-                return Err(e.into());
-            }
-            _ => (),
-        }
-
-        tries += 1;
-
-        tokio::time::sleep(Duration::from_millis(200)).await
-    }
 }
 
 impl Context {
@@ -184,10 +161,22 @@ impl Context {
     pub async fn handle_events(mut self) {
         while let Some(evt) = self.event_chan.1.recv().await {
             match evt {
-                ConnectionEvent::ConnCreate(addr, port, socket) => {
+                ConnectionEvent::TcpConnCreate(addr, port, socket) => {
                     if let Err(e) = self.create_connection_for(addr, port, socket).await {
                         error!(
-                            "Failed creating connection for container from {} on port {}: {:?}",
+                            "Failed creating tcp connection for container from {} on port {}: {:?}",
+                            addr, port, e
+                        );
+                        crate::trace_error!(self
+                            .event_chan
+                            .0
+                            .send(ConnectionEvent::ConnClosed(addr)));
+                    }
+                }
+                ConnectionEvent::UdpConnCreate(addr, port, socket) => {
+                    if let Err(e) = self.create_connection_for(addr, port, socket.0).await {
+                        error!(
+                            "Failed creating udp connection for container from {} on port {}: {:?}",
                             addr, port, e
                         );
                         crate::trace_error!(self
@@ -241,12 +230,15 @@ impl Context {
     }
 
     #[tracing::instrument(skip(self, client_stream))]
-    async fn create_connection_for(
+    async fn create_connection_for<S>(
         &mut self,
         client_addr: SocketAddr,
         port: u16,
-        client_stream: TcpStream,
-    ) -> miette::Result<()> {
+        client_stream: S,
+    ) -> miette::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + CreateConnection + Send + 'static,
+    {
         if let Some(container) = self.disconnected_containers.remove_key1(&client_addr.ip()) {
             if let Some(container) = container.take() {
                 // removal of this container has now been cancelled, we can use it
@@ -292,27 +284,33 @@ impl Context {
             .await
     }
 
-    async fn create_connection(
+    async fn create_connection<S>(
         &mut self,
         client_addr: SocketAddr,
         port: u16,
-        client_stream: TcpStream,
+        client_stream: S,
         container: DeployedContainer,
-    ) -> miette::Result<()> {
+    ) -> miette::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + CreateConnection + Send + 'static,
+    {
         info!(%client_addr, port, "Creating container connection");
-        let container_stream = create_connection_inner(port, &container).await?;
+        let container_stream = S::create_connection_inner(port, &container).await?;
 
         let (connection, close_send) = ActiveConnection::new(container.clone());
 
         self.active_connections.insert(client_addr, connection);
 
-        tokio::spawn(rx_tx_loop(
-            client_addr,
-            client_stream,
-            container_stream,
-            close_send,
-            self.event_chan.0.clone(),
-        ).instrument(tracing::Span::current()));
+        tokio::spawn(
+            rx_tx_loop(
+                client_addr,
+                client_stream,
+                container_stream,
+                close_send,
+                self.event_chan.0.clone(),
+            )
+            .instrument(tracing::Span::current()),
+        );
 
         Ok(())
     }
@@ -353,5 +351,61 @@ impl Context {
                 wrapped_container,
             );
         }
+    }
+}
+
+#[async_trait::async_trait]
+trait CreateConnection {
+    type Stream: Sized + AsyncRead + AsyncWrite + Unpin + Send;
+
+    async fn create_connection_inner(
+        port: u16,
+        container: &DeployedContainer,
+    ) -> miette::Result<Self::Stream>;
+}
+
+#[async_trait::async_trait]
+impl CreateConnection for TcpStream {
+    type Stream = Self;
+
+    async fn create_connection_inner(
+        port: u16,
+        container: &DeployedContainer,
+    ) -> miette::Result<Self::Stream> {
+        let max_tries = 10;
+        let mut tries = 0;
+
+        loop {
+            tracing::trace!("Trying to connect to {:?} on port {}", container.id, port);
+
+            match container.connect_tcp(port).await {
+                Ok(s) => return Ok(s),
+                Err(e) if tries == max_tries => {
+                    return Err(e.into());
+                }
+                _ => (),
+            }
+
+            tries += 1;
+
+            tokio::time::sleep(Duration::from_millis(200)).await
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CreateConnection for UdpStreamLocal {
+    type Stream = UdpStreamRemote;
+
+    async fn create_connection_inner(
+        port: u16,
+        container: &DeployedContainer,
+    ) -> miette::Result<Self::Stream> {
+        let s = container.connect_udp(port).await?;
+
+        // try to let the container boot
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        Ok(s)
     }
 }

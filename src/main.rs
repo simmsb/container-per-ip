@@ -1,16 +1,20 @@
 use bollard::image::CreateImageOptions;
 use bollard::{network::ConnectNetworkOptions, Docker};
 use clap::Parser;
+use futures::FutureExt;
 use futures::StreamExt;
+use itertools::Itertools;
 use miette::IntoDiagnostic;
 use once_cell::sync::Lazy;
-use std::collections::HashSet;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
+
+use crate::port::PortMode;
 
 mod connections;
 mod container_mgmt;
 mod listener;
+pub mod port;
 mod single_consumer;
 mod utils;
 
@@ -37,48 +41,6 @@ pub enum Error {
     },
 }
 
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
-enum ParsePortError {
-    #[error("Invalid port range: {} (parsed as: {})", range, parse)]
-    InvalidRange { range: String, parse: String },
-    #[error("Failed to parse number: {}", source)]
-    NoParse {
-        #[source]
-        source: std::num::ParseIntError,
-    },
-}
-
-fn parse_ports(src: &str) -> miette::Result<Vec<u16>> {
-    if let Ok(x) = src.parse::<u16>() {
-        return Ok(vec![x]);
-    }
-
-    let range: Vec<_> = src.split('-').collect();
-    match range.as_slice() {
-        [x] => {
-            let x = x
-                .parse::<u16>()
-                .map_err(|err| ParsePortError::NoParse { source: err })?;
-            Ok(vec![x])
-        }
-        [l, r] => {
-            let l = l
-                .parse::<u16>()
-                .map_err(|err| ParsePortError::NoParse { source: err })?;
-            let r = r
-                .parse::<u16>()
-                .map_err(|err| ParsePortError::NoParse { source: err })?;
-
-            Ok((l..r).collect())
-        }
-        x => Err(ParsePortError::InvalidRange {
-            range: src.to_string(),
-            parse: format!("{:?}", x),
-        }
-        .into()),
-    }
-}
-
 #[derive(Debug, clap::Parser)]
 #[clap(about = "Run a container per client ip", author)]
 pub struct Opts {
@@ -89,9 +51,12 @@ pub struct Opts {
     /// Should the containers be started with the `--privileged` flag
     pub privileged: bool,
 
-    #[clap(short, long, parse(try_from_str = parse_ports))]
-    /// Ports to listen on (tcp only currently)
-    pub ports: Vec<Vec<u16>>,
+    #[clap(short, long)]
+    /// Ports to listen on
+    ///
+    /// The supported syntax for ports is: udp:53, tcp:8080:80 (outside:inside),
+    /// tcp:5000-5100 (range), tcp:5000-5100:6000-6100 (outside range - inside range)
+    pub ports: Vec<String>,
 
     #[clap(short, long)]
     /// Volume bindings to provide to containers
@@ -131,8 +96,10 @@ fn install_tracing() -> miette::Result<()> {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_span_events(FmtSpan::CLOSE)
         .pretty();
-    let filter_layer = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive("container_per_ip=info".parse().into_diagnostic()?);
+    let filter_layer = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive("container_per_ip=info".parse().into_diagnostic()?)
+        .from_env()
+        .into_diagnostic()?;
 
     tracing_subscriber::registry()
         .with(tracing_error::ErrorLayer::default())
@@ -191,7 +158,12 @@ async fn main() -> miette::Result<()> {
 
     pull_if_needed(OPTS.force_pull).await?;
 
-    let ports: HashSet<_> = OPTS.ports.iter().flatten().cloned().collect();
+    let ports: Vec<_> = OPTS
+        .ports
+        .iter()
+        .map(|p| port::parse_port_mapping(p.as_str()))
+        .try_collect()?;
+    let ports = ports.into_iter().flat_map(|c| c.all_ports()).collect_vec();
 
     let (listener_stop_tx, listener_stop_rx): (Vec<_>, Vec<_>) =
         ports.iter().map(|_| oneshot::channel()).unzip();
@@ -203,6 +175,7 @@ async fn main() -> miette::Result<()> {
     ctrlc::set_handler({
         let evt_tx = evt_tx.clone();
         move || {
+            info!("Received quit request");
             trace_error!(evt_tx.send(connections::ConnectionEvent::Stop));
         }
     })
@@ -232,7 +205,10 @@ async fn main() -> miette::Result<()> {
     let listener_handles_fut = ports
         .iter()
         .zip(listener_stop_rx)
-        .map(|(port, stop_rx)| listener::listen_on(*port, evt_tx.clone(), stop_rx))
+        .map(|((mode, (ext, int)), stop_rx)| match mode {
+            PortMode::Tcp => listener::listen_on_tcp(*ext, *int, evt_tx.clone(), stop_rx).boxed(),
+            PortMode::Udp => listener::listen_on_udp(*ext, *int, evt_tx.clone(), stop_rx).boxed(),
+        })
         .collect::<Vec<_>>();
 
     let mut listener_handles = Vec::with_capacity(listener_handles_fut.len());

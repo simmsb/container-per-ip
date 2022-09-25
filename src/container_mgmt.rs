@@ -7,9 +7,10 @@ use bollard::{
     Docker,
 };
 use once_cell::sync::Lazy;
-use std::net::IpAddr;
-use tokio::net::TcpStream;
+use std::net::{IpAddr, Ipv4Addr};
+use tokio::net::{TcpStream, UdpSocket};
 use tracing::{info, warn};
+use udpflow::UdpStreamRemote;
 
 use crate::{Opts, DOCKER, OPTS};
 
@@ -62,7 +63,7 @@ pub struct DeployedContainer {
 }
 
 impl DeployedContainer {
-    pub async fn connect(&self, port: u16) -> Result<TcpStream> {
+    pub async fn connect_tcp(&self, port: u16) -> Result<TcpStream> {
         TcpStream::connect((self.ip_address, port))
             .await
             .map_err(|e| Error::ConnectContainer {
@@ -70,6 +71,18 @@ impl DeployedContainer {
                 port,
                 source: e,
             })
+    }
+
+    pub async fn connect_udp(&self, port: u16) -> Result<UdpStreamRemote> {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .map_err(|e| Error::ConnectContainer {
+                ip: self.ip_address,
+                port,
+                source: e,
+            })?;
+
+        Ok(UdpStreamRemote::new(socket, (self.ip_address, port).into()))
     }
 
     pub async fn check_up(&self) -> bool {

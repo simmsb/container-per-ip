@@ -1,6 +1,6 @@
 [package]
 name = "container-per-ip"
-version = "0.2.3"
+version = "0.3.0"
 authors = ["Ben Simms <ben@bensimms.moe>"]
 edition = "2018"
 
@@ -27,3 +27,7 @@ futures-delay-queue = { version = "0.5.2", default-features = false, features = 
 double-map = "0.14.0"
 in-container = { version = "1.1.0", default-features = false }
 uuid = { version = "1.1.2", features = ["v4"] }
+chumsky = "0.8.0"
+itertools = "0.10.5"
+udpflow = "0.1.0"
+async-trait = "0.1.57"

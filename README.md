@@ -39,7 +39,10 @@ OPTIONS:
             Set the docker network containers should be started in
 
     -p, --ports <PORTS>
-            Ports to listen on (tcp only currently)
+            Ports to listen on
+            
+            The supported syntax for ports is: udp:53, tcp:8080:80 (outside:inside), tcp:5000-5100
+            (range), tcp:5000-5100:6000-6100 (outside range - inside range)
 
         --parent-id <PARENT_ID>
             Specifies the unique id set in the container-per-ip.parent tag of spawned containers.
