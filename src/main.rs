@@ -1,4 +1,5 @@
 use bollard::image::CreateImageOptions;
+use bollard::service::ContainerInspectResponse;
 use bollard::{network::ConnectNetworkOptions, Docker};
 use clap::Parser;
 use futures::FutureExt;
@@ -188,15 +189,34 @@ async fn main() -> miette::Result<()> {
             let hostname = std::fs::read_to_string("/etc/hostname")
                 .map_err(|e| Error::IOError { source: e })?;
 
-            let config = ConnectNetworkOptions {
-                container: hostname.trim(),
-                endpoint_config: Default::default(),
-            };
+            let container_name = hostname.trim();
 
-            DOCKER
-                .connect_network(network, config)
+            let insp = DOCKER
+                .inspect_container(container_name, None)
                 .await
                 .map_err(|e| Error::Docker { source: e })?;
+
+            fn in_network(name: &str, insp: ContainerInspectResponse) -> Option<bool> {
+                let networks = insp.network_settings?.networks?;
+
+                Some(networks.contains_key(name))
+            }
+
+            let already_joined = in_network(network.as_str(), insp).unwrap_or(false);
+
+            if already_joined {
+                debug!("Already in network");
+            } else {
+                let config = ConnectNetworkOptions {
+                    container: container_name,
+                    endpoint_config: Default::default(),
+                };
+
+                DOCKER
+                    .connect_network(network, config)
+                    .await
+                    .map_err(|e| Error::Docker { source: e })?;
+            }
         }
     }
 
