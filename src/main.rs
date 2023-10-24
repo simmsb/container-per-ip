@@ -2,21 +2,24 @@ use bollard::image::CreateImageOptions;
 use bollard::service::ContainerInspectResponse;
 use bollard::{network::ConnectNetworkOptions, Docker};
 use clap::Parser;
-use futures::FutureExt;
+use coerce::actor::system::ActorSystem;
+use coerce::actor::{IntoActor, IntoActorId};
 use futures::StreamExt;
 use itertools::Itertools;
 use miette::IntoDiagnostic;
 use once_cell::sync::Lazy;
-use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
+use crate::coordinator::Coordinator;
 use crate::port::PortMode;
 
-mod connections;
+mod container;
+mod container_connection;
 mod container_mgmt;
+pub mod coordinator;
+mod create_connection;
 mod listener;
 pub mod port;
-mod single_consumer;
 mod utils;
 
 static DOCKER: Lazy<Docker> = Lazy::new(|| Docker::connect_with_local_defaults().unwrap());
@@ -90,13 +93,10 @@ pub struct Opts {
 }
 
 fn install_tracing() -> miette::Result<()> {
-    use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_span_events(FmtSpan::CLOSE)
-        .pretty();
+    let fmt_layer = tracing_subscriber::fmt::layer().compact();
     let filter_layer = tracing_subscriber::EnvFilter::builder()
         .with_default_directive("container_per_ip=info".parse().into_diagnostic()?)
         .from_env()
@@ -166,22 +166,6 @@ async fn main() -> miette::Result<()> {
         .try_collect()?;
     let ports = ports.into_iter().flat_map(|c| c.all_ports()).collect_vec();
 
-    let (listener_stop_tx, listener_stop_rx): (Vec<_>, Vec<_>) =
-        ports.iter().map(|_| oneshot::channel()).unzip();
-
-    let (evt_tx, context) = connections::Context::new(listener_stop_tx);
-
-    debug!("Setting C-c handler");
-
-    ctrlc::set_handler({
-        let evt_tx = evt_tx.clone();
-        move || {
-            info!("Received quit request");
-            trace_error!(evt_tx.send(connections::ConnectionEvent::Stop));
-        }
-    })
-    .unwrap();
-
     if in_container::in_container() {
         if let Some(network) = OPTS.network.as_ref() {
             debug!("Adding ourselves to {}", network);
@@ -220,34 +204,26 @@ async fn main() -> miette::Result<()> {
         }
     }
 
+    debug!("Starting coordinator");
+
+    let coordinator = Coordinator::new()
+        .into_actor(
+            Some("coordinator".into_actor_id()),
+            &ActorSystem::global_system(),
+        )
+        .await
+        .unwrap();
+
     debug!("Starting listeners");
 
-    let listener_handles_fut = ports
-        .iter()
-        .zip(listener_stop_rx)
-        .map(|((mode, (ext, int)), stop_rx)| match mode {
-            PortMode::Tcp => listener::listen_on_tcp(*ext, *int, evt_tx.clone(), stop_rx).boxed(),
-            PortMode::Udp => listener::listen_on_udp(*ext, *int, evt_tx.clone(), stop_rx).boxed(),
-        })
-        .collect::<Vec<_>>();
-
-    let mut listener_handles = Vec::with_capacity(listener_handles_fut.len());
-
-    for fut in listener_handles_fut {
-        match fut.await.map_err(|e| Error::ListenerSpawn { source: e }) {
-            Ok(handle) => listener_handles.push(handle),
-            Err(err) => {
-                error!("Failed spawning a listener, aborting");
-                return Err(err.into());
-            }
-        }
+    for (mode, (ext, int)) in ports {
+        match mode {
+            PortMode::Tcp => listener::listen_on_tcp(ext, int, coordinator.clone()).await?,
+            PortMode::Udp => listener::listen_on_udp(ext, int, coordinator.clone()).await?,
+        };
     }
 
-    context.handle_events().await;
-
-    for handle in listener_handles {
-        trace_error!(handle.await);
-    }
+    tokio::signal::ctrl_c().await.unwrap();
 
     container_mgmt::cleanup_containers().await?;
 

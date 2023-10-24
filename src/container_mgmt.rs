@@ -1,7 +1,7 @@
 use bollard::{
     container::{
-        Config, CreateContainerOptions, InspectContainerOptions, KillContainerOptions,
-        ListContainersOptions, StartContainerOptions,
+        Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions,
+        StartContainerOptions,
     },
     service::{ContainerCreateResponse, HostConfig},
     Docker,
@@ -49,6 +49,12 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContainerID(String);
+
+impl std::fmt::Display for ContainerID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl ContainerID {
     pub fn as_str(&self) -> &str {
@@ -102,6 +108,10 @@ impl DeployedContainer {
             .map(|s| s.running.unwrap_or(false))
             .unwrap_or(false)
     }
+
+    pub async fn stop(&self) {
+        remove_container(&self.id).await;
+    }
 }
 
 fn get_container_ip(
@@ -135,7 +145,7 @@ pub async fn deploy_container(docker: &Docker, opts: &Opts) -> Result<DeployedCo
         }),
         env: Some(opts.env.clone()),
         labels: Some(
-            [("container_per_ip.parent".to_owned(), PARENT_ID.clone())]
+            [("container-per-ip.parent".to_owned(), PARENT_ID.clone())]
                 .iter()
                 .cloned()
                 .collect(),
@@ -215,6 +225,8 @@ pub async fn remove_container(id: &ContainerID) {
 /// Ideally we should get all of them with the on-shutdown stuff,
 /// this just makes really sure
 pub async fn cleanup_containers() -> Result<()> {
+    use bollard::container::{RemoveContainerOptions, StopContainerOptions};
+
     let filters = [(
         "label".to_owned(),
         vec![format!("container-per-ip.parent={}", PARENT_ID.as_str())],
@@ -244,7 +256,19 @@ pub async fn cleanup_containers() -> Result<()> {
 
         crate::trace_error!(
             DOCKER
-                .kill_container(id.as_str(), Option::<KillContainerOptions<String>>::None)
+                .stop_container(id.as_str(), Some(StopContainerOptions { t: 5 }))
+                .await
+        );
+
+        crate::trace_error!(
+            DOCKER
+                .remove_container(
+                    id.as_str(),
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    })
+                )
                 .await
         );
     }

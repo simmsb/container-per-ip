@@ -1,15 +1,14 @@
 use std::fmt::Debug;
 use std::net::Ipv4Addr;
 
+use coerce::actor::LocalActorRef;
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::select;
-use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use tracing::{error, info};
-use udpflow::{UdpListener, UdpStreamLocal};
+use udpflow::UdpListener;
 
-use crate::connections::ConnectionEvent;
+use crate::coordinator::{Connect, Coordinator};
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
@@ -27,8 +26,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub async fn listen_on_tcp(
     ext: u16,
     int: u16,
-    events: mpsc::UnboundedSender<ConnectionEvent>,
-    mut stop: oneshot::Receiver<()>,
+    coordinator: LocalActorRef<Coordinator>,
 ) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, ext))
         .await
@@ -41,38 +39,31 @@ pub async fn listen_on_tcp(
         info!("Starting tcp listener on port {}:{}", ext, int);
 
         loop {
-            select! {
-                _ = &mut stop => {
-                    info!("Stopping listener on port {}:{}", ext,int);
-                    return;
-                },
-                r = listener.accept() => {
-                    match r {
-                        Ok((socket, addr)) => {
-                            info!("Incoming tcp connection from {} on port {}:{}", addr, ext, int);
-                            crate::trace_error!(events.send(ConnectionEvent::TcpConnCreate(addr, int, socket)));
-                        }
-                        Err(e) => error!("Failed connecting to client on port {}:{}: {}", ext, int, e),
-                    }
+            match listener.accept().await {
+                Ok((socket, addr)) => {
+                    info!(
+                        "Incoming tcp connection from {} on port {}:{}",
+                        addr, ext, int
+                    );
+                    coordinator
+                        .send(Connect {
+                            client_addr: addr,
+                            port: int,
+                            connection: Box::new(socket),
+                        })
+                        .await
+                        .unwrap();
                 }
+                Err(e) => error!("Failed connecting to client on port {}:{}: {}", ext, int, e),
             }
         }
     }))
 }
 
-pub struct UdpStream(pub UdpStreamLocal);
-
-impl Debug for UdpStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("UdpStream").finish()
-    }
-}
-
 pub async fn listen_on_udp(
     ext: u16,
     int: u16,
-    events: mpsc::UnboundedSender<ConnectionEvent>,
-    mut stop: oneshot::Receiver<()>,
+    coordinator: LocalActorRef<Coordinator>,
 ) -> Result<JoinHandle<()>> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, ext))
         .await
@@ -88,20 +79,22 @@ pub async fn listen_on_udp(
         let mut buf = vec![0u8; 8192];
 
         loop {
-            select! {
-                _ = &mut stop => {
-                    info!("Stopping listener on port {}:{}", ext,int);
-                    return;
-                },
-                r = listener.accept(&mut buf) => {
-                    match r {
-                        Ok((socket, addr)) => {
-                            info!("Incoming udp connection from {} on port {}:{}", addr, ext, int);
-                            crate::trace_error!(events.send(ConnectionEvent::UdpConnCreate(addr, int, UdpStream(socket))));
-                        }
-                        Err(e) => error!("Failed connecting to client on port {}:{}: {}", ext, int, e),
-                    }
+            match listener.accept(&mut buf).await {
+                Ok((socket, addr)) => {
+                    info!(
+                        "Incoming udp connection from {} on port {}:{}",
+                        addr, ext, int
+                    );
+                    coordinator
+                        .send(Connect {
+                            client_addr: addr,
+                            port: int,
+                            connection: Box::new(socket),
+                        })
+                        .await
+                        .unwrap();
                 }
+                Err(e) => error!("Failed connecting to client on port {}:{}: {}", ext, int, e),
             }
         }
     }))
