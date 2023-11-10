@@ -29,6 +29,21 @@ impl Container {
             stop_cancel: None,
         }
     }
+
+    async fn maybe_schedule_stop(&mut self, ctx: &mut ActorContext) {
+        if self.connections.is_empty() {
+            info!(
+                "All connections exhausted for {}, scheduling stop",
+                ctx.id()
+            );
+            if self.stop_cancel.is_none() {
+                self.stop_cancel = Some(
+                    self.actor_ref(ctx)
+                        .scheduled_notify(Stop(None), Duration::from_secs(OPTS.timeout as u64)),
+                );
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -57,15 +72,7 @@ impl Actor for Container {
             "Connection closed"
         );
 
-        if self.connections.is_empty() {
-            info!("All connections exhausted for {}, scheduling stop", id);
-            if self.stop_cancel.is_none() {
-                self.stop_cancel = Some(
-                    self.actor_ref(ctx)
-                        .scheduled_notify(Stop(None), Duration::from_secs(OPTS.timeout as u64)),
-                );
-            }
-        }
+        self.maybe_schedule_stop(ctx).await;
     }
 
     #[instrument(skip_all, fields(path = %_ctx.full_path()))]
@@ -141,6 +148,8 @@ impl Handler<Connect> for Container {
             }
             Err(e) => {
                 error!("Failed creating connection: {:?}", e);
+
+                self.maybe_schedule_stop(ctx).await;
             }
         }
     }
